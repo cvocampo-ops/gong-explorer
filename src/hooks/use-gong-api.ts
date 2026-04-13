@@ -81,5 +81,63 @@ export function useGongApi() {
     return {};
   }
 
-  return { fetchCalls, fetchCallDetail, downloadMedia };
+  async function fetchAllCalls(
+    fromDate: string,
+    toDate: string,
+    options?: {
+      signal?: AbortSignal;
+      onProgress?: (loaded: number, total: number | null) => void;
+      onRateLimitWarning?: (remaining: number) => Promise<boolean>;
+    }
+  ): Promise<{ data?: GongCall[]; error?: string }> {
+    if (!credentials) return { error: "Not connected" };
+
+    const allCalls: GongCall[] = [];
+    let cursor: string | undefined;
+    let total: number | null = null;
+
+    do {
+      if (options?.signal?.aborted) break;
+
+      const resp = await fetch("/api/gong/calls", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          credentials,
+          cursor,
+          fromDate,
+          toDate,
+        }),
+        signal: options?.signal,
+      });
+
+      const rateLimitRemaining = resp.headers.get("X-Gong-RateLimit-Remaining")
+        ? Number(resp.headers.get("X-Gong-RateLimit-Remaining"))
+        : undefined;
+
+      if (rateLimitRemaining !== undefined && rateLimitRemaining < 100 && options?.onRateLimitWarning) {
+        const shouldContinue = await options.onRateLimitWarning(rateLimitRemaining);
+        if (!shouldContinue) break;
+      }
+
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        return { error: (body as { error?: string }).error ?? `Request failed (${resp.status})` };
+      }
+
+      const data = (await resp.json()) as GongCallsResponse;
+      allCalls.push(...data.calls);
+
+      if (total === null) {
+        total = data.records.totalRecords;
+      }
+
+      options?.onProgress?.(allCalls.length, total);
+      cursor = data.records.cursor;
+    } while (cursor);
+
+    return { data: allCalls };
+  }
+
+  return { fetchCalls, fetchCallDetail, downloadMedia, fetchAllCalls };
 }
