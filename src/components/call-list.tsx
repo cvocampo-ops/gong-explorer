@@ -21,8 +21,16 @@ import {
   Search,
   Flame,
   Zap,
+  MousePointerClick,
+  Check,
+  DownloadCloud,
 } from "lucide-react";
 import type { GongCall } from "@/lib/types";
+import { BulkDownloadBar } from "@/components/bulk-download-bar";
+import { BulkDownloadModal } from "@/components/bulk-download-modal";
+import { DownloadAllDialog } from "@/components/download-all-dialog";
+import { useBulkDownload } from "@/hooks/use-bulk-download";
+import type { MediaType } from "@/hooks/use-bulk-download";
 
 function defaultFromDate(): string {
   const d = new Date();
@@ -36,7 +44,7 @@ function defaultToDate(): string {
 
 export function CallList() {
   const router = useRouter();
-  const { fetchCalls } = useGongApi();
+  const { fetchCalls, fetchAllCalls } = useGongApi();
   const { isConfigured } = useCredentials();
 
   const [calls, setCalls] = useState<GongCall[]>([]);
@@ -48,6 +56,18 @@ export function CallList() {
   const [toDate, setToDate] = useState(defaultToDate);
   const [totalRecords, setTotalRecords] = useState<number | null>(null);
   const [rateLimitRemaining, setRateLimitRemaining] = useState<number | undefined>();
+
+  // Selection state
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectedCalls, setSelectedCalls] = useState<Map<string, GongCall>>(new Map());
+  const [mediaType, setMediaType] = useState<MediaType>("both");
+  const [isLoadingAll, setIsLoadingAll] = useState(false);
+  const [isDownloadingAll, setIsDownloadingAll] = useState(false);
+  const [showDownloadAllDialog, setShowDownloadAllDialog] = useState(false);
+
+  // Bulk download
+  const { state: downloadState, startDownload, cancel: cancelDownload, reset: resetDownload } = useBulkDownload();
 
   const loadCalls = useCallback(
     async (opts?: { append?: boolean; cursorOverride?: string }) => {
@@ -103,6 +123,88 @@ export function CallList() {
 
   function handleLoadMore() {
     loadCalls({ append: true });
+  }
+
+  function toggleSelection(call: GongCall) {
+    const id = call.metaData.id;
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+    setSelectedCalls((prev) => {
+      const next = new Map(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.set(id, call);
+      }
+      return next;
+    });
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set());
+    setSelectedCalls(new Map());
+  }
+
+  function toggleSelectionMode() {
+    if (selectionMode) {
+      clearSelection();
+    }
+    setSelectionMode((prev) => !prev);
+  }
+
+  async function handleSelectAll() {
+    setIsLoadingAll(true);
+    const result = await fetchAllCalls(
+      `${fromDate}T00:00:00Z`,
+      `${toDate}T23:59:59Z`,
+      {}
+    );
+    setIsLoadingAll(false);
+
+    if (result.data) {
+      const ids = new Set<string>();
+      const callMap = new Map<string, GongCall>();
+      for (const call of result.data) {
+        ids.add(call.metaData.id);
+        callMap.set(call.metaData.id, call);
+      }
+      setSelectedIds(ids);
+      setSelectedCalls(callMap);
+    }
+  }
+
+  function handleDownload() {
+    const callsToDownload = Array.from(selectedCalls.values());
+    startDownload(callsToDownload, mediaType);
+  }
+
+  function handleCloseModal() {
+    resetDownload();
+  }
+
+  function handleDownloadAll() {
+    setShowDownloadAllDialog(true);
+  }
+
+  async function handleDownloadAllConfirm(selectedMediaType: MediaType) {
+    setShowDownloadAllDialog(false);
+    setIsDownloadingAll(true);
+    // Gong API requires date range — use a wide range to get everything
+    const allTimeFrom = "2015-01-01T00:00:00Z";
+    const allTimeTo = new Date().toISOString();
+    const result = await fetchAllCalls(allTimeFrom, allTimeTo, {});
+    setIsDownloadingAll(false);
+
+    if (result.data && result.data.length > 0) {
+      startDownload(result.data, selectedMediaType);
+    }
   }
 
   return (
@@ -162,6 +264,35 @@ export function CallList() {
             )}
             {loading ? "loading..." : "fetch"}
           </Button>
+          {calls.length > 0 && (
+            <Button
+              variant="outline"
+              onClick={toggleSelectionMode}
+              className={`rounded-xl border-white/10 px-4 transition-all ${
+                selectionMode
+                  ? "border-purple-500/30 bg-purple-500/10 text-purple-400"
+                  : "bg-white/5 hover:border-purple-500/30 hover:bg-purple-500/10 hover:text-purple-400"
+              }`}
+            >
+              <MousePointerClick className="mr-1.5 h-4 w-4" />
+              {selectionMode ? "cancel" : "select"}
+            </Button>
+          )}
+          {calls.length > 0 && !selectionMode && (
+            <Button
+              variant="outline"
+              onClick={handleDownloadAll}
+              disabled={isDownloadingAll}
+              className="rounded-xl border-white/10 bg-white/5 px-4 hover:border-purple-500/30 hover:bg-purple-500/10 hover:text-purple-400"
+            >
+              {isDownloadingAll ? (
+                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+              ) : (
+                <DownloadCloud className="mr-1.5 h-4 w-4" />
+              )}
+              {isDownloadingAll ? "loading..." : "download all"}
+            </Button>
+          )}
           <div className="ml-auto flex items-center gap-3 text-xs">
             {totalRecords !== null && (
               <span className="text-muted-foreground">
@@ -215,13 +346,38 @@ export function CallList() {
       {!loading && calls.length > 0 && (
         <>
           <div className="space-y-2">
-            {calls.map((call) => (
+            {calls.map((call) => {
+              const isSelected = selectedIds.has(call.metaData.id);
+              return (
               <div
                 key={call.metaData.id}
-                onClick={() => router.push(`/calls/${call.metaData.id}`)}
-                className="group relative cursor-pointer rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 transition-all duration-200 hover:border-purple-500/20 hover:bg-white/[0.04] hover:shadow-lg hover:shadow-purple-500/5"
+                onClick={() => {
+                  if (selectionMode) {
+                    toggleSelection(call);
+                  } else {
+                    router.push(`/calls/${call.metaData.id}`);
+                  }
+                }}
+                className={`group relative cursor-pointer rounded-xl border p-4 transition-all duration-200 ${
+                  isSelected
+                    ? "border-purple-500/30 bg-purple-500/[0.06]"
+                    : "border-white/[0.06] bg-white/[0.02] hover:border-purple-500/20 hover:bg-white/[0.04] hover:shadow-lg hover:shadow-purple-500/5"
+                }`}
               >
                 <div className="flex items-center gap-4">
+                  {/* Checkbox */}
+                  {selectionMode && (
+                    <div
+                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-all ${
+                        isSelected
+                          ? "border-purple-500 bg-purple-500 text-white"
+                          : "border-white/20 bg-white/5"
+                      }`}
+                    >
+                      {isSelected && <Check className="h-3 w-3" />}
+                    </div>
+                  )}
+
                   {/* Icon */}
                   <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
                     call.metaData.media === "Video"
@@ -265,10 +421,13 @@ export function CallList() {
                   </div>
 
                   {/* Arrow */}
-                  <ChevronRight className="h-4 w-4 text-muted-foreground/30 transition-all group-hover:translate-x-0.5 group-hover:text-purple-400" />
+                  {!selectionMode && (
+                    <ChevronRight className="h-4 w-4 text-muted-foreground/30 transition-all group-hover:translate-x-0.5 group-hover:text-purple-400" />
+                  )}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Load more */}
@@ -302,6 +461,44 @@ export function CallList() {
           </p>
         </div>
       )}
+
+      {/* Spacer for floating bar */}
+      {selectionMode && <div className="h-24" />}
+
+      {/* Bulk download bar */}
+      {selectionMode && (
+        <BulkDownloadBar
+          selectedCount={selectedIds.size}
+          totalRecords={totalRecords}
+          mediaType={mediaType}
+          onMediaTypeChange={setMediaType}
+          onSelectAll={handleSelectAll}
+          onClear={clearSelection}
+          onDownload={handleDownload}
+          isLoadingAll={isLoadingAll}
+        />
+      )}
+
+      {/* Download All options dialog */}
+      {showDownloadAllDialog && (
+        <DownloadAllDialog
+          totalCalls={totalRecords ?? calls.length}
+          avgDurationSeconds={
+            calls.length > 0
+              ? calls.reduce((sum, c) => sum + c.metaData.duration, 0) / calls.length
+              : 0
+          }
+          onConfirm={handleDownloadAllConfirm}
+          onClose={() => setShowDownloadAllDialog(false)}
+        />
+      )}
+
+      {/* Download progress modal */}
+      <BulkDownloadModal
+        state={downloadState}
+        onCancel={cancelDownload}
+        onClose={handleCloseModal}
+      />
     </div>
   );
 }
