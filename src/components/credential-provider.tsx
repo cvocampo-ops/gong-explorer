@@ -28,18 +28,26 @@ function isCredentials(value: unknown): value is Credentials {
   return false;
 }
 
+function readStoredCredentials(): Credentials | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const stored = sessionStorage.getItem(STORAGE_KEY);
+    if (!stored) return null;
+    const parsed = JSON.parse(stored);
+    return isCredentials(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export function CredentialProvider({ children }: { children: ReactNode }) {
-  const [credentials, setCredentialsState] = useState<Credentials | null>(null);
+  const [credentials, setCredentialsState] = useState<Credentials | null>(() =>
+    typeof window === "undefined" ? null : readStoredCredentials()
+  );
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     try {
-      const stored = sessionStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        if (isCredentials(parsed)) setCredentialsState(parsed);
-      }
-      // Drop any legacy single-provider blob so it doesn't linger.
       sessionStorage.removeItem(LEGACY_STORAGE_KEY);
     } catch {
       // sessionStorage unavailable
