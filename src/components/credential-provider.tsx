@@ -52,6 +52,7 @@ export function CredentialProvider({ children }: { children: ReactNode }) {
     } catch {
       // sessionStorage unavailable
     }
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- gate hydration: initial render must match SSR (null), then reveal client-side state
     setLoaded(true);
   }, []);
 
