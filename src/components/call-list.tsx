@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { useGongApi } from "@/hooks/use-gong-api";
 import { useCredentials } from "@/components/credential-provider";
@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ExportDialog } from "@/components/export-dialog";
 import {
   AlertCircle,
   ChevronRight,
@@ -21,6 +22,8 @@ import {
   Search,
   Flame,
   Zap,
+  Download,
+  Package,
 } from "lucide-react";
 import type { GongCall } from "@/lib/types";
 
@@ -49,6 +52,9 @@ export function CallList() {
   const [totalRecords, setTotalRecords] = useState<number | null>(null);
   const [rateLimitRemaining, setRateLimitRemaining] = useState<number | undefined>();
 
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [exportMode, setExportMode] = useState<"selected" | "filter" | null>(null);
+
   const loadCalls = useCallback(
     async (opts?: { append?: boolean; cursorOverride?: string }) => {
       const isAppend = opts?.append ?? false;
@@ -58,6 +64,7 @@ export function CallList() {
         setLoading(true);
         setCalls([]);
         setCursor(undefined);
+        setSelectedIds(new Set());
       }
       setError("");
 
@@ -104,6 +111,36 @@ export function CallList() {
   function handleLoadMore() {
     loadCalls({ append: true });
   }
+
+  function toggleSelect(id: string, e?: React.MouseEvent) {
+    e?.stopPropagation();
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const allVisibleSelected = useMemo(
+    () => calls.length > 0 && calls.every((c) => selectedIds.has(c.metaData.id)),
+    [calls, selectedIds]
+  );
+
+  function toggleSelectAllVisible() {
+    setSelectedIds((prev) => {
+      if (allVisibleSelected) {
+        const next = new Set(prev);
+        for (const c of calls) next.delete(c.metaData.id);
+        return next;
+      }
+      const next = new Set(prev);
+      for (const c of calls) next.add(c.metaData.id);
+      return next;
+    });
+  }
+
+  const selectedArray = useMemo(() => Array.from(selectedIds), [selectedIds]);
 
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6 px-4 py-6 sm:px-6">
@@ -185,6 +222,43 @@ export function CallList() {
         </div>
       </div>
 
+      {/* Export action bar */}
+      {calls.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-2.5">
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={allVisibleSelected}
+              onChange={toggleSelectAllVisible}
+              className="h-4 w-4 accent-purple-500"
+            />
+            <span>
+              {selectedIds.size > 0
+                ? `${selectedIds.size} selected`
+                : `select all visible (${calls.length})`}
+            </span>
+          </label>
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setExportMode("selected")}
+              disabled={selectedIds.size === 0}
+              className="rounded-xl border-white/10 bg-white/5 hover:border-purple-500/30 hover:bg-purple-500/10 hover:text-purple-400"
+            >
+              <Download className="mr-2 h-4 w-4" />
+              export selected ({selectedIds.size})
+            </Button>
+            <Button
+              onClick={() => setExportMode("filter")}
+              className="gradient-btn rounded-xl border-0 text-white shadow-lg shadow-purple-500/20"
+            >
+              <Package className="mr-2 h-4 w-4" />
+              export all matching
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Error */}
       {error && (
         <Alert variant="destructive" className="rounded-xl border-red-500/20 bg-red-500/10">
@@ -215,60 +289,82 @@ export function CallList() {
       {!loading && calls.length > 0 && (
         <>
           <div className="space-y-2">
-            {calls.map((call) => (
-              <div
-                key={call.metaData.id}
-                onClick={() => router.push(`/calls/${call.metaData.id}`)}
-                className="group relative cursor-pointer rounded-xl border border-white/[0.06] bg-white/[0.02] p-4 transition-all duration-200 hover:border-purple-500/20 hover:bg-white/[0.04] hover:shadow-lg hover:shadow-purple-500/5"
-              >
-                <div className="flex items-center gap-4">
-                  {/* Icon */}
-                  <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
-                    call.metaData.media === "Video"
-                      ? "bg-gradient-to-br from-purple-500/20 to-pink-500/20 text-purple-400"
-                      : "bg-gradient-to-br from-cyan-500/20 to-blue-500/20 text-cyan-400"
-                  }`}>
-                    {call.metaData.media === "Video" ? (
-                      <Video className="h-4 w-4" />
-                    ) : (
-                      <Phone className="h-4 w-4" />
-                    )}
-                  </div>
-
-                  {/* Info */}
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate font-medium text-foreground">
-                        {call.metaData.title || "Untitled Call"}
-                      </span>
+            {calls.map((call) => {
+              const isSelected = selectedIds.has(call.metaData.id);
+              return (
+                <div
+                  key={call.metaData.id}
+                  onClick={() => router.push(`/calls/${call.metaData.id}`)}
+                  className={`group relative cursor-pointer rounded-xl border p-4 transition-all duration-200 hover:shadow-lg hover:shadow-purple-500/5 ${
+                    isSelected
+                      ? "border-purple-500/30 bg-purple-500/5"
+                      : "border-white/[0.06] bg-white/[0.02] hover:border-purple-500/20 hover:bg-white/[0.04]"
+                  }`}
+                >
+                  <div className="flex items-center gap-4">
+                    {/* Checkbox */}
+                    <div
+                      onClick={(e) => toggleSelect(call.metaData.id, e)}
+                      className="flex shrink-0 items-center justify-center p-1"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => {}}
+                        onClick={(e) => e.stopPropagation()}
+                        className="h-4 w-4 accent-purple-500"
+                        aria-label="Select call"
+                      />
                     </div>
-                    <div className="mt-0.5 flex items-center gap-3 text-sm text-muted-foreground">
-                      <span>{formatDate(call.metaData.started)}</span>
-                      <span className="text-white/10">|</span>
-                      <span>{formatDuration(call.metaData.duration)}</span>
-                      <span className="text-white/10">|</span>
-                      <span className="flex items-center gap-1">
-                        <Users className="h-3 w-3" />
-                        {call.parties?.length ?? 0}
-                      </span>
+
+                    {/* Icon */}
+                    <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
+                      call.metaData.media === "Video"
+                        ? "bg-gradient-to-br from-purple-500/20 to-pink-500/20 text-purple-400"
+                        : "bg-gradient-to-br from-cyan-500/20 to-blue-500/20 text-cyan-400"
+                    }`}>
+                      {call.metaData.media === "Video" ? (
+                        <Video className="h-4 w-4" />
+                      ) : (
+                        <Phone className="h-4 w-4" />
+                      )}
                     </div>
-                  </div>
 
-                  {/* Tags */}
-                  <div className="hidden items-center gap-2 sm:flex">
-                    <Badge variant="outline" className="rounded-full border-white/10 bg-white/5 text-[10px] font-medium text-muted-foreground">
-                      {call.metaData.system}
-                    </Badge>
-                    <Badge variant="outline" className="rounded-full border-white/10 bg-white/5 text-[10px] font-medium text-muted-foreground">
-                      {call.metaData.direction}
-                    </Badge>
-                  </div>
+                    {/* Info */}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate font-medium text-foreground">
+                          {call.metaData.title || "Untitled Call"}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-3 text-sm text-muted-foreground">
+                        <span>{formatDate(call.metaData.started)}</span>
+                        <span className="text-white/10">|</span>
+                        <span>{formatDuration(call.metaData.duration)}</span>
+                        <span className="text-white/10">|</span>
+                        <span className="flex items-center gap-1">
+                          <Users className="h-3 w-3" />
+                          {call.parties?.length ?? 0}
+                        </span>
+                      </div>
+                    </div>
 
-                  {/* Arrow */}
-                  <ChevronRight className="h-4 w-4 text-muted-foreground/30 transition-all group-hover:translate-x-0.5 group-hover:text-purple-400" />
+                    {/* Tags */}
+                    <div className="hidden items-center gap-2 sm:flex">
+                      <Badge variant="outline" className="rounded-full border-white/10 bg-white/5 text-[10px] font-medium text-muted-foreground">
+                        {call.metaData.system}
+                      </Badge>
+                      <Badge variant="outline" className="rounded-full border-white/10 bg-white/5 text-[10px] font-medium text-muted-foreground">
+                        {call.metaData.direction}
+                      </Badge>
+                    </div>
+
+                    {/* Arrow */}
+                    <ChevronRight className="h-4 w-4 text-muted-foreground/30 transition-all group-hover:translate-x-0.5 group-hover:text-purple-400" />
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Load more */}
@@ -302,6 +398,22 @@ export function CallList() {
           </p>
         </div>
       )}
+
+      {/* Export dialogs */}
+      <ExportDialog
+        open={exportMode === "selected"}
+        onClose={() => setExportMode(null)}
+        mode="selected"
+        callIds={selectedArray}
+        count={selectedArray.length}
+      />
+      <ExportDialog
+        open={exportMode === "filter"}
+        onClose={() => setExportMode(null)}
+        mode="filter"
+        filter={{ fromDate: `${fromDate}T00:00:00Z`, toDate: `${toDate}T23:59:59Z` }}
+        count={totalRecords ?? undefined}
+      />
     </div>
   );
 }

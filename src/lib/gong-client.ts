@@ -176,3 +176,129 @@ export async function fetchMediaStream(
     return { error: `Media download error: ${message}` };
   }
 }
+
+export async function fetchCallsPage(
+  creds: GongCredentials,
+  options: {
+    cursor?: string;
+    fromDate?: string;
+    toDate?: string;
+    callIds?: string[];
+  }
+): Promise<ApiResult<GongCallsResponse>> {
+  const baseUrl = normalizeBaseUrl(creds.baseUrl);
+  const filter: Record<string, unknown> = {};
+  if (options.fromDate) filter.fromDateTime = options.fromDate;
+  if (options.toDate) filter.toDateTime = options.toDate;
+  if (options.callIds && options.callIds.length > 0) filter.callIds = options.callIds;
+
+  const payload: Record<string, unknown> = {
+    filter,
+    contentSelector: {
+      exposedFields: {
+        content: {
+          brief: true,
+          outline: true,
+          highlights: true,
+          callOutcome: true,
+          topics: true,
+          trackers: true,
+        },
+        collaboration: {
+          publicComments: true,
+        },
+        interaction: {
+          interactionStats: true,
+          speakers: true,
+          video: true,
+          questions: true,
+        },
+        media: true,
+        parties: true,
+      },
+    },
+  };
+  if (options.cursor) payload.cursor = options.cursor;
+
+  try {
+    const resp = await fetch(`${baseUrl}/v2/calls/extensive`, {
+      method: "POST",
+      headers: {
+        Authorization: buildAuthHeader(creds),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const rateLimitRemaining = resp.headers.get("X-RateLimit-Remaining")
+      ? Number(resp.headers.get("X-RateLimit-Remaining"))
+      : undefined;
+
+    if (resp.status === 429) {
+      const retryAfter = resp.headers.get("Retry-After");
+      return {
+        error: `rate-limited:${retryAfter ?? "60"}`,
+        rateLimitRemaining: 0,
+      };
+    }
+
+    if (!resp.ok) {
+      const body = await resp.text();
+      return { error: `Gong API error (${resp.status}): ${body}`, rateLimitRemaining };
+    }
+
+    const data = (await resp.json()) as GongCallsResponse;
+    return { data, rateLimitRemaining };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return { error: `Network error: ${message}` };
+  }
+}
+
+export async function fetchTranscript(
+  creds: GongCredentials,
+  callId: string,
+  fromDate?: string,
+  toDate?: string
+): Promise<ApiResult<{ callId: string; transcript: Array<{ speakerId?: string; topic?: string; sentences: Array<{ start: number; end: number; text: string }> }> }>> {
+  const baseUrl = normalizeBaseUrl(creds.baseUrl);
+
+  const filter: Record<string, unknown> = { callIds: [callId] };
+  if (fromDate) filter.fromDateTime = fromDate;
+  if (toDate) filter.toDateTime = toDate;
+
+  try {
+    const resp = await fetch(`${baseUrl}/v2/calls/transcript`, {
+      method: "POST",
+      headers: {
+        Authorization: buildAuthHeader(creds),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ filter }),
+    });
+
+    const rateLimitRemaining = resp.headers.get("X-RateLimit-Remaining")
+      ? Number(resp.headers.get("X-RateLimit-Remaining"))
+      : undefined;
+
+    if (resp.status === 429) {
+      const retryAfter = resp.headers.get("Retry-After");
+      return { error: `rate-limited:${retryAfter ?? "60"}`, rateLimitRemaining: 0 };
+    }
+
+    if (!resp.ok) {
+      const body = await resp.text();
+      return { error: `Transcript error (${resp.status}): ${body}`, rateLimitRemaining };
+    }
+
+    const body = (await resp.json()) as { callTranscripts?: Array<{ callId: string; transcript: Array<{ speakerId?: string; topic?: string; sentences: Array<{ start: number; end: number; text: string }> }> }> };
+    const first = body.callTranscripts?.[0];
+    if (!first) {
+      return { error: "No transcript available", rateLimitRemaining };
+    }
+    return { data: first, rateLimitRemaining };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return { error: `Network error: ${message}` };
+  }
+}

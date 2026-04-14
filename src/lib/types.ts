@@ -123,3 +123,38 @@ export interface ApiResult<T> {
   error?: string;
   rateLimitRemaining?: number;
 }
+
+export interface ExportOptions {
+  includeMedia: boolean;
+  includeTranscripts: boolean;
+}
+
+export interface ExportFilter {
+  fromDate?: string;
+  toDate?: string;
+}
+
+export interface ExportRequestPayload {
+  credentials: GongCredentials;
+  callIds?: string[];
+  filter?: ExportFilter;
+  options: ExportOptions;
+}
+
+export interface ManifestRow {
+  id: string;
+  date: string;
+  title: string;
+  account: string;
+  duration_min: number;
+  direction: string;
+  system: string;
+  internal_attendees: string;
+  external_attendees: string;
+  outcome: string;
+  folder: string;
+  media_included: boolean;
+  transcript_included: boolean;
+  status: "ok" | "partial" | "error";
+  error: string;
+}

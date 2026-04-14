@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ExportDialog } from "@/components/export-dialog";
 import {
   AlertCircle,
   ArrowLeft,
@@ -21,11 +22,11 @@ import {
   Monitor,
   ArrowUpDown,
   Globe,
-  FileText,
   Sparkles,
   MessageSquare,
   Hash,
   Target,
+  Package,
 } from "lucide-react";
 import type { GongCall } from "@/lib/types";
 
@@ -43,6 +44,7 @@ export function CallDetail({ callId }: CallDetailProps) {
   const [error, setError] = useState("");
   const [downloadingAudio, setDownloadingAudio] = useState(false);
   const [downloadingVideo, setDownloadingVideo] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
 
   useEffect(() => {
     if (!isConfigured) {
@@ -190,51 +192,69 @@ export function CallDetail({ callId }: CallDetailProps) {
       <div className="gradient-border rounded-2xl p-[1px]">
         <div className="glass rounded-2xl p-6">
           <h3 className="mb-4 flex items-center gap-2 text-base font-semibold">
-            <Download className="h-4 w-4 text-purple-400" /> recordings
+            <Download className="h-4 w-4 text-purple-400" /> downloads
           </h3>
-          {!call.media?.audioUrl && !call.media?.videoUrl ? (
-            <p className="text-sm text-muted-foreground">
-              no media available. might still be processing, or you need the{" "}
+          <div className="flex flex-wrap gap-3">
+            <Button
+              onClick={() => setExportOpen(true)}
+              className="gradient-btn rounded-xl border-0 text-white shadow-lg shadow-purple-500/20"
+            >
+              <Package className="mr-2 h-4 w-4" />
+              download bundle (zip)
+            </Button>
+            {call.media?.audioUrl && (
+              <Button
+                variant="outline"
+                onClick={handleDownloadAudio}
+                disabled={downloadingAudio}
+                className="rounded-xl border-white/10 bg-white/5 hover:border-cyan-500/30 hover:bg-cyan-500/10 hover:text-cyan-400"
+              >
+                {downloadingAudio ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Music className="mr-2 h-4 w-4" />
+                )}
+                {downloadingAudio ? "downloading..." : "raw audio"}
+              </Button>
+            )}
+            {call.media?.videoUrl && (
+              <Button
+                variant="outline"
+                onClick={handleDownloadVideo}
+                disabled={downloadingVideo}
+                className="rounded-xl border-white/10 bg-white/5 hover:border-purple-500/30 hover:bg-purple-500/10 hover:text-purple-400"
+              >
+                {downloadingVideo ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Video className="mr-2 h-4 w-4" />
+                )}
+                {downloadingVideo ? "downloading..." : "raw video"}
+              </Button>
+            )}
+          </div>
+          <p className="mt-3 text-xs text-muted-foreground/70">
+            Bundle includes media + metadata.json + summary.md. Raw buttons download just the media file.
+          </p>
+          {!call.media?.audioUrl && !call.media?.videoUrl && (
+            <p className="mt-3 text-sm text-muted-foreground">
+              no media available. bundle will still include metadata. might still be processing, or you need the{" "}
               <code className="rounded-md bg-white/5 px-1.5 py-0.5 text-xs text-purple-400">
                 api:calls:read:media-url
               </code>{" "}
-              scope.
+              scope for media.
             </p>
-          ) : (
-            <div className="flex flex-wrap gap-3">
-              {call.media?.audioUrl && (
-                <Button
-                  variant="outline"
-                  onClick={handleDownloadAudio}
-                  disabled={downloadingAudio}
-                  className="rounded-xl border-white/10 bg-white/5 hover:border-cyan-500/30 hover:bg-cyan-500/10 hover:text-cyan-400"
-                >
-                  {downloadingAudio ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Music className="mr-2 h-4 w-4" />
-                  )}
-                  {downloadingAudio ? "downloading..." : "download audio"}
-                </Button>
-              )}
-              {call.media?.videoUrl && (
-                <Button
-                  onClick={handleDownloadVideo}
-                  disabled={downloadingVideo}
-                  className="gradient-btn rounded-xl border-0 text-white shadow-lg shadow-purple-500/20"
-                >
-                  {downloadingVideo ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <Video className="mr-2 h-4 w-4" />
-                  )}
-                  {downloadingVideo ? "downloading..." : "download video"}
-                </Button>
-              )}
-            </div>
           )}
         </div>
       </div>
+
+      <ExportDialog
+        open={exportOpen}
+        onClose={() => setExportOpen(false)}
+        mode="single"
+        callIds={[callId]}
+        callTitle={call.metaData.title || "Untitled Call"}
+      />
 
       {/* Participants */}
       <div className="gradient-border rounded-2xl p-[1px]">
