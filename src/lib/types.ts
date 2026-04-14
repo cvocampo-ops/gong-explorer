@@ -214,6 +214,8 @@ export interface ApiResult<T> {
 
 export interface ExportOptions {
   includeMedia: boolean;
+  mediaType?: "audio" | "video" | "both";
+  includeMetadata?: boolean;
   includeTranscripts: boolean;
 }
 

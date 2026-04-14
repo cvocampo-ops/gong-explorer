@@ -1,7 +1,13 @@
 "use client";
 
 import { useCredentials } from "@/components/credential-provider";
-import type { NormalizedCall, NormalizedCallsResponse } from "@/lib/types";
+import { gongToNormalized } from "@/lib/gong-normalize";
+import type {
+  GongCall,
+  GongCallsResponse,
+  NormalizedCall,
+  NormalizedCallsResponse,
+} from "@/lib/types";
 
 export function useCallApi() {
   const { credentials } = useCredentials();
@@ -37,6 +43,19 @@ export function useCallApi() {
       };
     }
 
+    if (provider === "gong") {
+      const data = (await resp.json()) as GongCallsResponse;
+      return {
+        data: {
+          calls: data.calls.map(gongToNormalized),
+          cursor: data.records?.cursor,
+          totalRecords: data.records?.totalRecords,
+        },
+        rateLimitRemaining,
+      };
+    }
+
+    // SalesLoft routes already return NormalizedCallsResponse.
     const data = (await resp.json()) as NormalizedCallsResponse;
     return { data, rateLimitRemaining };
   }
@@ -55,8 +74,13 @@ export function useCallApi() {
       return { error: (body as { error?: string }).error ?? `Request failed (${resp.status})` };
     }
 
-    const data = (await resp.json()) as NormalizedCall;
-    return { data };
+    if (provider === "gong") {
+      const call = (await resp.json()) as GongCall;
+      return { data: gongToNormalized(call) };
+    }
+
+    const call = (await resp.json()) as NormalizedCall;
+    return { data: call };
   }
 
   async function downloadMedia(mediaUrl: string, filename: string): Promise<{ error?: string }> {
@@ -85,5 +109,37 @@ export function useCallApi() {
     return {};
   }
 
-  return { fetchCalls, fetchCallDetail, downloadMedia };
+  async function fetchAllCalls(
+    fromDate: string,
+    toDate: string,
+    options?: {
+      signal?: AbortSignal;
+      onProgress?: (loaded: number, total: number | null) => void;
+    }
+  ): Promise<{ data?: NormalizedCall[]; error?: string }> {
+    if (!credentials || !provider) return { error: "Not connected" };
+
+    const all: NormalizedCall[] = [];
+    let cursor: string | undefined;
+    let total: number | null = null;
+
+    do {
+      if (options?.signal?.aborted) break;
+
+      const page = await fetchCalls({ cursor, fromDate, toDate });
+      if (page.error) return { error: page.error };
+      if (!page.data) break;
+
+      all.push(...page.data.calls);
+      if (total === null && page.data.totalRecords !== undefined) {
+        total = page.data.totalRecords;
+      }
+      options?.onProgress?.(all.length, total);
+      cursor = page.data.cursor;
+    } while (cursor);
+
+    return { data: all };
+  }
+
+  return { fetchCalls, fetchCallDetail, downloadMedia, fetchAllCalls };
 }

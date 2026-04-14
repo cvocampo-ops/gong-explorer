@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { useGongApi } from "@/hooks/use-gong-api";
+import { useCallApi } from "@/hooks/use-call-api";
 import { useCredentials } from "@/components/credential-provider";
 import { formatDuration, formatDate } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,6 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ExportDialog } from "@/components/export-dialog";
 import {
   AlertCircle,
   ChevronRight,
@@ -22,10 +21,16 @@ import {
   Search,
   Flame,
   Zap,
-  Download,
-  Package,
+  MousePointerClick,
+  Check,
+  DownloadCloud,
 } from "lucide-react";
-import type { GongCall } from "@/lib/types";
+import type { NormalizedCall } from "@/lib/types";
+import { BulkDownloadBar } from "@/components/bulk-download-bar";
+import { BulkDownloadModal } from "@/components/bulk-download-modal";
+import { DownloadAllDialog } from "@/components/download-all-dialog";
+import { useBulkDownload } from "@/hooks/use-bulk-download";
+import type { MediaType } from "@/hooks/use-bulk-download";
 
 function defaultFromDate(): string {
   const d = new Date();
@@ -39,10 +44,10 @@ function defaultToDate(): string {
 
 export function CallList() {
   const router = useRouter();
-  const { fetchCalls } = useGongApi();
-  const { isConfigured } = useCredentials();
+  const { fetchCalls, fetchAllCalls } = useCallApi();
+  const { isConfigured, provider } = useCredentials();
 
-  const [calls, setCalls] = useState<GongCall[]>([]);
+  const [calls, setCalls] = useState<NormalizedCall[]>([]);
   const [cursor, setCursor] = useState<string | undefined>();
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -52,8 +57,19 @@ export function CallList() {
   const [totalRecords, setTotalRecords] = useState<number | null>(null);
   const [rateLimitRemaining, setRateLimitRemaining] = useState<number | undefined>();
 
+  // Selection state
+  const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [exportMode, setExportMode] = useState<"selected" | "filter" | null>(null);
+  const [selectedCalls, setSelectedCalls] = useState<Map<string, NormalizedCall>>(new Map());
+  const [mediaType, setMediaType] = useState<MediaType>("both");
+  const [includeMetadata, setIncludeMetadata] = useState(true);
+  const [includeTranscripts, setIncludeTranscripts] = useState(false);
+  const [isLoadingAll, setIsLoadingAll] = useState(false);
+  const [isDownloadingAll, setIsDownloadingAll] = useState(false);
+  const [showDownloadAllDialog, setShowDownloadAllDialog] = useState(false);
+
+  // Bulk download
+  const { state: downloadState, startDownload, cancel: cancelDownload, reset: resetDownload } = useBulkDownload();
 
   const loadCalls = useCallback(
     async (opts?: { append?: boolean; cursorOverride?: string }) => {
@@ -64,7 +80,6 @@ export function CallList() {
         setLoading(true);
         setCalls([]);
         setCursor(undefined);
-        setSelectedIds(new Set());
       }
       setError("");
 
@@ -85,9 +100,9 @@ export function CallList() {
           setCalls((prev) => [...prev, ...result.data!.calls]);
         } else {
           setCalls(result.data.calls);
-          setTotalRecords(result.data.records.totalRecords);
+          setTotalRecords(result.data.totalRecords ?? null);
         }
-        setCursor(result.data.records.cursor);
+        setCursor(result.data.cursor);
       }
 
       setLoading(false);
@@ -112,35 +127,94 @@ export function CallList() {
     loadCalls({ append: true });
   }
 
-  function toggleSelect(id: string, e?: React.MouseEvent) {
-    e?.stopPropagation();
+  function toggleSelection(call: NormalizedCall) {
+    const id = call.id;
     setSelectedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  const allVisibleSelected = useMemo(
-    () => calls.length > 0 && calls.every((c) => selectedIds.has(c.metaData.id)),
-    [calls, selectedIds]
-  );
-
-  function toggleSelectAllVisible() {
-    setSelectedIds((prev) => {
-      if (allVisibleSelected) {
-        const next = new Set(prev);
-        for (const c of calls) next.delete(c.metaData.id);
-        return next;
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
       }
-      const next = new Set(prev);
-      for (const c of calls) next.add(c.metaData.id);
+      return next;
+    });
+    setSelectedCalls((prev) => {
+      const next = new Map(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.set(id, call);
+      }
       return next;
     });
   }
 
-  const selectedArray = useMemo(() => Array.from(selectedIds), [selectedIds]);
+  function clearSelection() {
+    setSelectedIds(new Set());
+    setSelectedCalls(new Map());
+  }
+
+  function toggleSelectionMode() {
+    if (selectionMode) {
+      clearSelection();
+    }
+    setSelectionMode((prev) => !prev);
+  }
+
+  async function handleSelectAll() {
+    setIsLoadingAll(true);
+    const result = await fetchAllCalls(
+      `${fromDate}T00:00:00Z`,
+      `${toDate}T23:59:59Z`,
+      {}
+    );
+    setIsLoadingAll(false);
+
+    if (result.data) {
+      const ids = new Set<string>();
+      const callMap = new Map<string, NormalizedCall>();
+      for (const call of result.data) {
+        ids.add(call.id);
+        callMap.set(call.id, call);
+      }
+      setSelectedIds(ids);
+      setSelectedCalls(callMap);
+    }
+  }
+
+  function handleDownload() {
+    const callsToDownload = Array.from(selectedCalls.values());
+    startDownload(callsToDownload, mediaType, { includeMetadata, includeTranscripts });
+  }
+
+  function handleCloseModal() {
+    resetDownload();
+  }
+
+  function handleDownloadAll() {
+    setShowDownloadAllDialog(true);
+  }
+
+  async function handleDownloadAllConfirm(options: {
+    mediaType: MediaType;
+    includeMetadata: boolean;
+    includeTranscripts: boolean;
+  }) {
+    setShowDownloadAllDialog(false);
+    setIsDownloadingAll(true);
+    // API requires date range — use a wide range to get everything
+    const allTimeFrom = "2015-01-01T00:00:00Z";
+    const allTimeTo = new Date().toISOString();
+    const result = await fetchAllCalls(allTimeFrom, allTimeTo, {});
+    setIsDownloadingAll(false);
+
+    if (result.data && result.data.length > 0) {
+      startDownload(result.data, options.mediaType, {
+        includeMetadata: options.includeMetadata,
+        includeTranscripts: options.includeTranscripts,
+      });
+    }
+  }
 
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6 px-4 py-6 sm:px-6">
@@ -153,7 +227,7 @@ export function CallList() {
       {/* Page header */}
       <div className="relative">
         <h2 className="text-3xl font-bold tracking-tight">
-          your calls <Flame className="mb-1 inline h-6 w-6 text-orange-400" />
+          your {provider === "salesloft" ? "salesloft" : "gong"} calls <Flame className="mb-1 inline h-6 w-6 text-orange-400" />
         </h2>
         <p className="text-base text-muted-foreground">
           browse, vibe check, and download recordings
@@ -199,6 +273,35 @@ export function CallList() {
             )}
             {loading ? "loading..." : "fetch"}
           </Button>
+          {calls.length > 0 && (
+            <Button
+              variant="outline"
+              onClick={toggleSelectionMode}
+              className={`rounded-xl border-white/10 px-4 transition-all ${
+                selectionMode
+                  ? "border-purple-500/30 bg-purple-500/10 text-purple-400"
+                  : "bg-white/5 hover:border-purple-500/30 hover:bg-purple-500/10 hover:text-purple-400"
+              }`}
+            >
+              <MousePointerClick className="mr-1.5 h-4 w-4" />
+              {selectionMode ? "cancel" : "select"}
+            </Button>
+          )}
+          {calls.length > 0 && !selectionMode && (
+            <Button
+              variant="outline"
+              onClick={handleDownloadAll}
+              disabled={isDownloadingAll}
+              className="rounded-xl border-white/10 bg-white/5 px-4 hover:border-purple-500/30 hover:bg-purple-500/10 hover:text-purple-400"
+            >
+              {isDownloadingAll ? (
+                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+              ) : (
+                <DownloadCloud className="mr-1.5 h-4 w-4" />
+              )}
+              {isDownloadingAll ? "loading..." : "download all"}
+            </Button>
+          )}
           <div className="ml-auto flex items-center gap-3 text-xs">
             {totalRecords !== null && (
               <span className="text-muted-foreground">
@@ -221,43 +324,6 @@ export function CallList() {
           </div>
         </div>
       </div>
-
-      {/* Export action bar */}
-      {calls.length > 0 && (
-        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-2.5">
-          <label className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={allVisibleSelected}
-              onChange={toggleSelectAllVisible}
-              className="h-4 w-4 accent-purple-500"
-            />
-            <span>
-              {selectedIds.size > 0
-                ? `${selectedIds.size} selected`
-                : `select all visible (${calls.length})`}
-            </span>
-          </label>
-          <div className="ml-auto flex flex-wrap items-center gap-2">
-            <Button
-              variant="outline"
-              onClick={() => setExportMode("selected")}
-              disabled={selectedIds.size === 0}
-              className="rounded-xl border-white/10 bg-white/5 hover:border-purple-500/30 hover:bg-purple-500/10 hover:text-purple-400"
-            >
-              <Download className="mr-2 h-4 w-4" />
-              export selected ({selectedIds.size})
-            </Button>
-            <Button
-              onClick={() => setExportMode("filter")}
-              className="gradient-btn rounded-xl border-0 text-white shadow-lg shadow-purple-500/20"
-            >
-              <Package className="mr-2 h-4 w-4" />
-              export all matching
-            </Button>
-          </div>
-        </div>
-      )}
 
       {/* Error */}
       {error && (
@@ -290,79 +356,89 @@ export function CallList() {
         <>
           <div className="space-y-2">
             {calls.map((call) => {
-              const isSelected = selectedIds.has(call.metaData.id);
+              const isSelected = selectedIds.has(call.id);
               return (
-                <div
-                  key={call.metaData.id}
-                  onClick={() => router.push(`/calls/${call.metaData.id}`)}
-                  className={`group relative cursor-pointer rounded-xl border p-4 transition-all duration-200 hover:shadow-lg hover:shadow-purple-500/5 ${
-                    isSelected
-                      ? "border-purple-500/30 bg-purple-500/5"
-                      : "border-white/[0.06] bg-white/[0.02] hover:border-purple-500/20 hover:bg-white/[0.04]"
-                  }`}
-                >
-                  <div className="flex items-center gap-4">
-                    {/* Checkbox */}
+              <div
+                key={call.id}
+                onClick={() => {
+                  if (selectionMode) {
+                    toggleSelection(call);
+                  } else {
+                    router.push(`/calls/${call.id}`);
+                  }
+                }}
+                className={`group relative cursor-pointer rounded-xl border p-4 transition-all duration-200 ${
+                  isSelected
+                    ? "border-purple-500/30 bg-purple-500/[0.06]"
+                    : "border-white/[0.06] bg-white/[0.02] hover:border-purple-500/20 hover:bg-white/[0.04] hover:shadow-lg hover:shadow-purple-500/5"
+                }`}
+              >
+                <div className="flex items-center gap-4">
+                  {/* Checkbox */}
+                  {selectionMode && (
                     <div
-                      onClick={(e) => toggleSelect(call.metaData.id, e)}
-                      className="flex shrink-0 items-center justify-center p-1"
+                      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-all ${
+                        isSelected
+                          ? "border-purple-500 bg-purple-500 text-white"
+                          : "border-white/20 bg-white/5"
+                      }`}
                     >
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={() => {}}
-                        onClick={(e) => e.stopPropagation()}
-                        className="h-4 w-4 accent-purple-500"
-                        aria-label="Select call"
-                      />
+                      {isSelected && <Check className="h-3 w-3" />}
                     </div>
+                  )}
 
-                    {/* Icon */}
-                    <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
-                      call.metaData.media === "Video"
-                        ? "bg-gradient-to-br from-purple-500/20 to-pink-500/20 text-purple-400"
-                        : "bg-gradient-to-br from-cyan-500/20 to-blue-500/20 text-cyan-400"
-                    }`}>
-                      {call.metaData.media === "Video" ? (
-                        <Video className="h-4 w-4" />
-                      ) : (
-                        <Phone className="h-4 w-4" />
-                      )}
-                    </div>
-
-                    {/* Info */}
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate font-medium text-foreground">
-                          {call.metaData.title || "Untitled Call"}
-                        </span>
-                      </div>
-                      <div className="mt-0.5 flex items-center gap-3 text-sm text-muted-foreground">
-                        <span>{formatDate(call.metaData.started)}</span>
-                        <span className="text-white/10">|</span>
-                        <span>{formatDuration(call.metaData.duration)}</span>
-                        <span className="text-white/10">|</span>
-                        <span className="flex items-center gap-1">
-                          <Users className="h-3 w-3" />
-                          {call.parties?.length ?? 0}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Tags */}
-                    <div className="hidden items-center gap-2 sm:flex">
-                      <Badge variant="outline" className="rounded-full border-white/10 bg-white/5 text-[10px] font-medium text-muted-foreground">
-                        {call.metaData.system}
-                      </Badge>
-                      <Badge variant="outline" className="rounded-full border-white/10 bg-white/5 text-[10px] font-medium text-muted-foreground">
-                        {call.metaData.direction}
-                      </Badge>
-                    </div>
-
-                    {/* Arrow */}
-                    <ChevronRight className="h-4 w-4 text-muted-foreground/30 transition-all group-hover:translate-x-0.5 group-hover:text-purple-400" />
+                  {/* Icon */}
+                  <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${
+                    call.media === "Video"
+                      ? "bg-gradient-to-br from-purple-500/20 to-pink-500/20 text-purple-400"
+                      : "bg-gradient-to-br from-cyan-500/20 to-blue-500/20 text-cyan-400"
+                  }`}>
+                    {call.media === "Video" ? (
+                      <Video className="h-4 w-4" />
+                    ) : (
+                      <Phone className="h-4 w-4" />
+                    )}
                   </div>
+
+                  {/* Info */}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate font-medium text-foreground">
+                        {call.title || "Untitled Call"}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-3 text-sm text-muted-foreground">
+                      <span>{formatDate(call.started)}</span>
+                      <span className="text-white/10">|</span>
+                      <span>{formatDuration(call.durationSec)}</span>
+                      <span className="text-white/10">|</span>
+                      <span className="flex items-center gap-1">
+                        <Users className="h-3 w-3" />
+                        {call.parties.length}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Tags */}
+                  <div className="hidden items-center gap-2 sm:flex">
+                    {call.system && (
+                      <Badge variant="outline" className="rounded-full border-white/10 bg-white/5 text-[10px] font-medium text-muted-foreground">
+                        {call.system}
+                      </Badge>
+                    )}
+                    {call.direction && (
+                      <Badge variant="outline" className="rounded-full border-white/10 bg-white/5 text-[10px] font-medium text-muted-foreground">
+                        {call.direction}
+                      </Badge>
+                    )}
+                  </div>
+
+                  {/* Arrow */}
+                  {!selectionMode && (
+                    <ChevronRight className="h-4 w-4 text-muted-foreground/30 transition-all group-hover:translate-x-0.5 group-hover:text-purple-400" />
+                  )}
                 </div>
+              </div>
               );
             })}
           </div>
@@ -399,20 +475,46 @@ export function CallList() {
         </div>
       )}
 
-      {/* Export dialogs */}
-      <ExportDialog
-        open={exportMode === "selected"}
-        onClose={() => setExportMode(null)}
-        mode="selected"
-        callIds={selectedArray}
-        count={selectedArray.length}
-      />
-      <ExportDialog
-        open={exportMode === "filter"}
-        onClose={() => setExportMode(null)}
-        mode="filter"
-        filter={{ fromDate: `${fromDate}T00:00:00Z`, toDate: `${toDate}T23:59:59Z` }}
-        count={totalRecords ?? undefined}
+      {/* Spacer for floating bar */}
+      {selectionMode && <div className="h-24" />}
+
+      {/* Bulk download bar */}
+      {selectionMode && (
+        <BulkDownloadBar
+          selectedCount={selectedIds.size}
+          totalRecords={totalRecords}
+          mediaType={mediaType}
+          onMediaTypeChange={setMediaType}
+          includeMetadata={includeMetadata}
+          onIncludeMetadataChange={setIncludeMetadata}
+          includeTranscripts={includeTranscripts}
+          onIncludeTranscriptsChange={setIncludeTranscripts}
+          onSelectAll={handleSelectAll}
+          onClear={clearSelection}
+          onDownload={handleDownload}
+          isLoadingAll={isLoadingAll}
+        />
+      )}
+
+      {/* Download All options dialog */}
+      {showDownloadAllDialog && (
+        <DownloadAllDialog
+          totalCalls={totalRecords ?? calls.length}
+          avgDurationSeconds={
+            calls.length > 0
+              ? calls.reduce((sum, c) => sum + c.durationSec, 0) / calls.length
+              : 0
+          }
+          onConfirm={handleDownloadAllConfirm}
+          onClose={() => setShowDownloadAllDialog(false)}
+        />
+      )}
+
+      {/* Download progress modal */}
+      <BulkDownloadModal
+        state={downloadState}
+        onCancel={cancelDownload}
+        onClose={handleCloseModal}
       />
     </div>
   );

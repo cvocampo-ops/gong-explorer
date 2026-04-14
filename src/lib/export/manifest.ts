@@ -2,6 +2,7 @@ import type { ManifestRow } from "@/lib/types";
 
 const COLUMNS: Array<keyof ManifestRow> = [
   "id",
+  "provider",
   "date",
   "title",
   "account",

@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
 import { fetchCallById } from "@/lib/gong-client";
-import { gongToNormalized } from "@/lib/gong-normalize";
 import type { GongCredentials } from "@/lib/types";
 
 export async function POST(
@@ -33,5 +32,5 @@ export async function POST(
     return Response.json({ error: "Call not found" }, { status: 404 });
   }
 
-  return Response.json(gongToNormalized(call));
+  return Response.json(call);
 }

@@ -1,7 +1,6 @@
 import { NextRequest } from "next/server";
 import { fetchCalls } from "@/lib/gong-client";
-import { gongToNormalized } from "@/lib/gong-normalize";
-import type { GongCredentials, NormalizedCallsResponse } from "@/lib/types";
+import type { GongCredentials } from "@/lib/types";
 
 export async function POST(request: NextRequest) {
   const body = (await request.json()) as {
@@ -34,18 +33,15 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const normalized: NormalizedCallsResponse = {
-    calls: (result.data?.calls ?? []).map(gongToNormalized),
-    cursor: result.data?.records.cursor,
-    totalRecords: result.data?.records.totalRecords,
-  };
-
-  return Response.json(normalized, {
+  return Response.json(result.data, {
     headers: rateLimitHeaders(result.rateLimitRemaining),
   });
 }
 
 function rateLimitHeaders(remaining?: number): Record<string, string> {
   if (remaining === undefined) return {};
-  return { "X-RateLimit-Remaining": String(remaining) };
+  return {
+    "X-Gong-RateLimit-Remaining": String(remaining),
+    "X-RateLimit-Remaining": String(remaining),
+  };
 }

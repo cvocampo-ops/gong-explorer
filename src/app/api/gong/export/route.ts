@@ -18,18 +18,32 @@ function validate(payload: unknown): ExportRequestPayload | { error: string } {
   const p = payload as Record<string, unknown>;
 
   const creds = p.credentials as Record<string, unknown> | undefined;
+  if (!creds) {
+    return { error: "Missing credentials" };
+  }
+  if (creds.provider !== "gong") {
+    return { error: "Export is only supported for Gong provider right now" };
+  }
   if (
-    !creds ||
     typeof creds.accessKey !== "string" ||
     typeof creds.accessKeySecret !== "string" ||
     typeof creds.baseUrl !== "string"
   ) {
-    return { error: "Missing credentials" };
+    return { error: "Invalid Gong credentials" };
   }
 
   const options = p.options as Record<string, unknown> | undefined;
   if (!options || typeof options.includeMedia !== "boolean" || typeof options.includeTranscripts !== "boolean") {
     return { error: "Missing export options" };
+  }
+
+  if (
+    options.mediaType !== undefined &&
+    options.mediaType !== "audio" &&
+    options.mediaType !== "video" &&
+    options.mediaType !== "both"
+  ) {
+    return { error: "mediaType must be audio, video, or both" };
   }
 
   const callIds = p.callIds;
@@ -53,6 +67,7 @@ function validate(payload: unknown): ExportRequestPayload | { error: string } {
 
   return {
     credentials: {
+      provider: "gong",
       accessKey: creds.accessKey,
       accessKeySecret: creds.accessKeySecret,
       baseUrl: creds.baseUrl,
@@ -61,6 +76,8 @@ function validate(payload: unknown): ExportRequestPayload | { error: string } {
     filter: filter as ExportRequestPayload["filter"],
     options: {
       includeMedia: options.includeMedia,
+      mediaType: options.mediaType as "audio" | "video" | "both" | undefined,
+      includeMetadata: options.includeMetadata !== false,
       includeTranscripts: options.includeTranscripts,
     },
   };
@@ -92,7 +109,20 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: parsed.error }, { status: 400 });
   }
 
-  const nodeStream = streamExportZip(parsed);
+  // Provider is narrowed to "gong" by validate(); pass the Gong-native shape to the zipper.
+  if (parsed.credentials.provider !== "gong") {
+    return Response.json({ error: "Export is only supported for Gong" }, { status: 400 });
+  }
+  const nodeStream = streamExportZip({
+    credentials: {
+      accessKey: parsed.credentials.accessKey,
+      accessKeySecret: parsed.credentials.accessKeySecret,
+      baseUrl: parsed.credentials.baseUrl,
+    },
+    callIds: parsed.callIds,
+    filter: parsed.filter,
+    options: parsed.options,
+  });
   const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream<Uint8Array>;
 
   const filename = `gong-export-${timestamp()}.zip`;

@@ -113,10 +113,18 @@ async function fetchMediaToStream(url: string): Promise<Readable | { error: stri
   return Readable.fromWeb(resp.body as unknown as import("node:stream/web").ReadableStream);
 }
 
-function pickMediaInfo(call: GongCall): { url: string; filename: string } | undefined {
-  if (call.media?.videoUrl) return { url: call.media.videoUrl, filename: "recording.mp4" };
-  if (call.media?.audioUrl) return { url: call.media.audioUrl, filename: "recording.mp3" };
-  return undefined;
+function pickMediaFiles(
+  call: GongCall,
+  mediaType: "audio" | "video" | "both"
+): Array<{ url: string; filename: string }> {
+  const files: Array<{ url: string; filename: string }> = [];
+  if ((mediaType === "audio" || mediaType === "both") && call.media?.audioUrl) {
+    files.push({ url: call.media.audioUrl, filename: "recording.mp3" });
+  }
+  if ((mediaType === "video" || mediaType === "both") && call.media?.videoUrl) {
+    files.push({ url: call.media.videoUrl, filename: "recording.mp4" });
+  }
+  return files;
 }
 
 function formatAttendees(
@@ -175,6 +183,7 @@ export function streamExportZip(params: StreamExportOptions): Readable {
 
         const row: ManifestRow = {
           id: call.metaData.id,
+          provider: "gong",
           date: call.metaData.started,
           title: call.metaData.title || "Untitled Call",
           account,
@@ -191,22 +200,27 @@ export function streamExportZip(params: StreamExportOptions): Readable {
           error: "",
         };
 
-        // Always include metadata.json + summary.md
-        archive.append(JSON.stringify(call, null, 2), { name: `${folder}/metadata.json` });
-        archive.append(renderSummaryMarkdown(call), { name: `${folder}/summary.md` });
+        const includeMetadata = params.options.includeMetadata !== false;
+        if (includeMetadata) {
+          archive.append(JSON.stringify(call, null, 2), { name: `${folder}/metadata.json` });
+          archive.append(renderSummaryMarkdown(call), { name: `${folder}/summary.md` });
+        }
 
         // Media
         if (params.options.includeMedia) {
-          const media = pickMediaInfo(call);
-          if (media) {
-            const streamOrError = await fetchMediaToStream(media.url);
-            if ("error" in streamOrError) {
-              row.status = "partial";
-              row.error = `media: ${streamOrError.error}`;
-            } else {
+          const mediaType = params.options.mediaType ?? "both";
+          const mediaFiles = pickMediaFiles(call, mediaType);
+          if (mediaFiles.length > 0) {
+            for (const media of mediaFiles) {
+              const streamOrError = await fetchMediaToStream(media.url);
+              if ("error" in streamOrError) {
+                row.status = "partial";
+                const msg = `${media.filename}: ${streamOrError.error}`;
+                row.error = row.error ? `${row.error}; ${msg}` : msg;
+                continue;
+              }
               archive.append(streamOrError, { name: `${folder}/${media.filename}` });
               row.media_included = true;
-              // Wait for this entry to finish before fetching the next call, to keep memory flat
               await new Promise<void>((resolve, reject) => {
                 const onEntry = (entry: archiver.EntryData) => {
                   if (entry.name === `${folder}/${media.filename}`) {
@@ -226,7 +240,7 @@ export function streamExportZip(params: StreamExportOptions): Readable {
             }
           } else {
             row.status = "partial";
-            row.error = row.error ? `${row.error}; no media url` : "no media url";
+            row.error = row.error ? `${row.error}; no ${mediaType} url` : `no ${mediaType} url`;
           }
         }
 
@@ -269,9 +283,11 @@ export function streamExportZip(params: StreamExportOptions): Readable {
         manifestRows.push(row);
       }
 
-      // Top-level manifest files
-      archive.append(buildManifestCsv(manifestRows), { name: "manifest.csv" });
-      archive.append(buildManifestJson(manifestRows), { name: "manifest.json" });
+      // Top-level manifest files (only if including metadata)
+      if (params.options.includeMetadata !== false) {
+        archive.append(buildManifestCsv(manifestRows), { name: "manifest.csv" });
+        archive.append(buildManifestJson(manifestRows), { name: "manifest.json" });
+      }
 
       await archive.finalize();
     } catch (err) {

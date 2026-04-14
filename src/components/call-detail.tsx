@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { useGongApi } from "@/hooks/use-gong-api";
+import { useCallApi } from "@/hooks/use-call-api";
 import { useCredentials } from "@/components/credential-provider";
 import { formatDuration, formatDateTime } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,7 @@ import {
   Target,
   Package,
 } from "lucide-react";
-import type { GongCall } from "@/lib/types";
+import type { GongCall, NormalizedCall } from "@/lib/types";
 
 interface CallDetailProps {
   callId: string;
@@ -36,10 +36,10 @@ interface CallDetailProps {
 
 export function CallDetail({ callId }: CallDetailProps) {
   const router = useRouter();
-  const { fetchCallDetail, downloadMedia } = useGongApi();
-  const { isConfigured } = useCredentials();
+  const { fetchCallDetail, downloadMedia } = useCallApi();
+  const { isConfigured, provider } = useCredentials();
 
-  const [call, setCall] = useState<GongCall | null>(null);
+  const [call, setCall] = useState<NormalizedCall | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [downloadingAudio, setDownloadingAudio] = useState(false);
@@ -69,19 +69,19 @@ export function CallDetail({ callId }: CallDetailProps) {
   }, [callId, isConfigured]);
 
   async function handleDownloadAudio() {
-    if (!call?.media?.audioUrl) return;
+    if (!call?.audioUrl) return;
     setDownloadingAudio(true);
-    const title = call.metaData.title?.replace(/[^a-zA-Z0-9-_ ]/g, "") || "recording";
-    const result = await downloadMedia(call.media.audioUrl, `${title}.mp3`);
+    const title = call.title?.replace(/[^a-zA-Z0-9-_ ]/g, "") || "recording";
+    const result = await downloadMedia(call.audioUrl, `${title}.mp3`);
     if (result.error) setError(result.error);
     setDownloadingAudio(false);
   }
 
   async function handleDownloadVideo() {
-    if (!call?.media?.videoUrl) return;
+    if (!call?.videoUrl) return;
     setDownloadingVideo(true);
-    const title = call.metaData.title?.replace(/[^a-zA-Z0-9-_ ]/g, "") || "recording";
-    const result = await downloadMedia(call.media.videoUrl, `${title}.mp4`);
+    const title = call.title?.replace(/[^a-zA-Z0-9-_ ]/g, "") || "recording";
+    const result = await downloadMedia(call.videoUrl, `${title}.mp4`);
     if (result.error) setError(result.error);
     setDownloadingVideo(false);
   }
@@ -123,8 +123,13 @@ export function CallDetail({ callId }: CallDetailProps) {
 
   if (!call) return null;
 
-  const internalParties = call.parties?.filter((p) => p.affiliation === "Internal") ?? [];
-  const externalParties = call.parties?.filter((p) => p.affiliation !== "Internal") ?? [];
+  const internalParties = call.parties.filter((p) => p.affiliation === "Internal");
+  const externalParties = call.parties.filter((p) => p.affiliation !== "Internal");
+
+  // Gong-specific deep payload (for AI summary, highlights, etc).
+  const gongRaw = provider === "gong" ? (call.raw as GongCall) : null;
+  const isVideo = call.media === "Video";
+  const exportSupported = provider === "gong";
 
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-8 sm:px-6">
@@ -147,29 +152,35 @@ export function CallDetail({ callId }: CallDetailProps) {
       {/* Hero section */}
       <div className="relative">
         <h2 className="text-3xl font-bold tracking-tight sm:text-4xl">
-          {call.metaData.title || "Untitled Call"}
+          {call.title || "Untitled Call"}
         </h2>
         <p className="mt-1.5 text-base text-muted-foreground">
-          {formatDateTime(call.metaData.started)}
+          {formatDateTime(call.started)}
         </p>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Badge variant="outline" className="gap-1 rounded-full border-white/10 bg-white/5 text-xs text-muted-foreground">
             <Clock className="h-3 w-3 text-purple-400" />
-            {formatDuration(call.metaData.duration)}
+            {formatDuration(call.durationSec)}
           </Badge>
-          <Badge variant="outline" className="gap-1 rounded-full border-white/10 bg-white/5 text-xs text-muted-foreground">
-            <Monitor className="h-3 w-3 text-cyan-400" />
-            {call.metaData.system}
-          </Badge>
-          <Badge variant="outline" className="gap-1 rounded-full border-white/10 bg-white/5 text-xs text-muted-foreground">
-            <ArrowUpDown className="h-3 w-3 text-pink-400" />
-            {call.metaData.direction}
-          </Badge>
-          <Badge variant="outline" className="gap-1 rounded-full border-white/10 bg-white/5 text-xs text-muted-foreground">
-            <Globe className="h-3 w-3 text-green-400" />
-            {call.metaData.scope}
-          </Badge>
-          {call.metaData.media === "Video" ? (
+          {call.system && (
+            <Badge variant="outline" className="gap-1 rounded-full border-white/10 bg-white/5 text-xs text-muted-foreground">
+              <Monitor className="h-3 w-3 text-cyan-400" />
+              {call.system}
+            </Badge>
+          )}
+          {call.direction && (
+            <Badge variant="outline" className="gap-1 rounded-full border-white/10 bg-white/5 text-xs text-muted-foreground">
+              <ArrowUpDown className="h-3 w-3 text-pink-400" />
+              {call.direction}
+            </Badge>
+          )}
+          {call.scope && (
+            <Badge variant="outline" className="gap-1 rounded-full border-white/10 bg-white/5 text-xs text-muted-foreground">
+              <Globe className="h-3 w-3 text-green-400" />
+              {call.scope}
+            </Badge>
+          )}
+          {isVideo ? (
             <Badge className="gap-1 rounded-full border-0 bg-purple-500/15 text-xs text-purple-400">
               <Video className="h-3 w-3" /> video
             </Badge>
@@ -195,14 +206,16 @@ export function CallDetail({ callId }: CallDetailProps) {
             <Download className="h-4 w-4 text-purple-400" /> downloads
           </h3>
           <div className="flex flex-wrap gap-3">
-            <Button
-              onClick={() => setExportOpen(true)}
-              className="gradient-btn rounded-xl border-0 text-white shadow-lg shadow-purple-500/20"
-            >
-              <Package className="mr-2 h-4 w-4" />
-              download bundle (zip)
-            </Button>
-            {call.media?.audioUrl && (
+            {exportSupported && (
+              <Button
+                onClick={() => setExportOpen(true)}
+                className="gradient-btn rounded-xl border-0 text-white shadow-lg shadow-purple-500/20"
+              >
+                <Package className="mr-2 h-4 w-4" />
+                download bundle (zip)
+              </Button>
+            )}
+            {call.audioUrl && (
               <Button
                 variant="outline"
                 onClick={handleDownloadAudio}
@@ -217,7 +230,7 @@ export function CallDetail({ callId }: CallDetailProps) {
                 {downloadingAudio ? "downloading..." : "raw audio"}
               </Button>
             )}
-            {call.media?.videoUrl && (
+            {call.videoUrl && (
               <Button
                 variant="outline"
                 onClick={handleDownloadVideo}
@@ -233,34 +246,36 @@ export function CallDetail({ callId }: CallDetailProps) {
               </Button>
             )}
           </div>
-          <p className="mt-3 text-xs text-muted-foreground/70">
-            Bundle includes media + metadata.json + summary.md. Raw buttons download just the media file.
-          </p>
-          {!call.media?.audioUrl && !call.media?.videoUrl && (
+          {exportSupported && (
+            <p className="mt-3 text-xs text-muted-foreground/70">
+              Bundle includes media + metadata.json + summary.md. Raw buttons download just the media file.
+            </p>
+          )}
+          {!call.audioUrl && !call.videoUrl && (
             <p className="mt-3 text-sm text-muted-foreground">
-              no media available. bundle will still include metadata. might still be processing, or you need the{" "}
-              <code className="rounded-md bg-white/5 px-1.5 py-0.5 text-xs text-purple-400">
-                api:calls:read:media-url
-              </code>{" "}
-              scope for media.
+              no media available. {provider === "gong"
+                ? "might still be processing, or you need the api:calls:read:media-url scope for media."
+                : "this conversation may not have a recording yet, or your key lacks the 'Download Conversations' permission."}
             </p>
           )}
         </div>
       </div>
 
-      <ExportDialog
-        open={exportOpen}
-        onClose={() => setExportOpen(false)}
-        mode="single"
-        callIds={[callId]}
-        callTitle={call.metaData.title || "Untitled Call"}
-      />
+      {exportSupported && (
+        <ExportDialog
+          open={exportOpen}
+          onClose={() => setExportOpen(false)}
+          mode="single"
+          callIds={[callId]}
+          callTitle={call.title || "Untitled Call"}
+        />
+      )}
 
       {/* Participants */}
       <div className="gradient-border rounded-2xl p-[1px]">
         <div className="glass rounded-2xl p-6">
           <h3 className="mb-4 flex items-center gap-2 text-base font-semibold">
-            <Users className="h-4 w-4 text-pink-400" /> participants ({call.parties?.length ?? 0})
+            <Users className="h-4 w-4 text-pink-400" /> participants ({call.parties.length})
           </h3>
           <div className="space-y-5">
             {internalParties.length > 0 && (
@@ -272,12 +287,12 @@ export function CallDetail({ callId }: CallDetailProps) {
                   {internalParties.map((p, i) => (
                     <div key={i} className="flex items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-colors hover:bg-white/[0.04]">
                       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500/20 to-pink-500/20 text-sm font-semibold text-purple-400">
-                        {(p.name ?? p.emailAddress ?? "?")[0].toUpperCase()}
+                        {(p.name ?? p.email ?? "?")[0].toUpperCase()}
                       </div>
                       <div className="min-w-0">
                         <div className="truncate font-medium">{p.name ?? "Unknown"}</div>
                         <div className="truncate text-xs text-muted-foreground">
-                          {[p.title, p.emailAddress].filter(Boolean).join(" - ")}
+                          {[p.title, p.email].filter(Boolean).join(" - ")}
                         </div>
                       </div>
                     </div>
@@ -294,12 +309,12 @@ export function CallDetail({ callId }: CallDetailProps) {
                   {externalParties.map((p, i) => (
                     <div key={i} className="flex items-center gap-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-3 transition-colors hover:bg-white/[0.04]">
                       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-500/20 to-blue-500/20 text-sm font-semibold text-cyan-400">
-                        {(p.name ?? p.emailAddress ?? "?")[0].toUpperCase()}
+                        {(p.name ?? p.email ?? "?")[0].toUpperCase()}
                       </div>
                       <div className="min-w-0">
                         <div className="truncate font-medium">{p.name ?? "Unknown"}</div>
                         <div className="truncate text-xs text-muted-foreground">
-                          {[p.title, p.emailAddress].filter(Boolean).join(" - ")}
+                          {[p.title, p.email].filter(Boolean).join(" - ")}
                         </div>
                       </div>
                     </div>
@@ -307,7 +322,7 @@ export function CallDetail({ callId }: CallDetailProps) {
                 </div>
               </div>
             )}
-            {(!call.parties || call.parties.length === 0) && (
+            {call.parties.length === 0 && (
               <p className="text-sm text-muted-foreground">no participant data available</p>
             )}
           </div>
@@ -315,28 +330,28 @@ export function CallDetail({ callId }: CallDetailProps) {
       </div>
 
       {/* AI Summary */}
-      {call.content?.brief && (
+      {call.summary && (
         <div className="gradient-border rounded-2xl p-[1px]">
           <div className="glass rounded-2xl p-6">
             <h3 className="mb-3 flex items-center gap-2 text-base font-semibold">
               <Sparkles className="h-4 w-4 text-yellow-400" /> ai summary
             </h3>
             <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-muted-foreground">
-              {call.content.brief}
+              {call.summary}
             </p>
           </div>
         </div>
       )}
 
-      {/* Highlights */}
-      {call.content?.highlights && call.content.highlights.length > 0 && (
+      {/* Highlights (Gong only) */}
+      {gongRaw?.content?.highlights && gongRaw.content.highlights.length > 0 && (
         <div className="gradient-border rounded-2xl p-[1px]">
           <div className="glass rounded-2xl p-6">
             <h3 className="mb-4 flex items-center gap-2 text-base font-semibold">
               <MessageSquare className="h-4 w-4 text-green-400" /> highlights
             </h3>
             <div className="space-y-4">
-              {call.content.highlights.map((h, i) => (
+              {gongRaw.content.highlights.map((h, i) => (
                 <div key={i}>
                   <h4 className="font-medium text-foreground">{h.title}</h4>
                   <ul className="ml-4 mt-1.5 list-disc space-y-1 marker:text-purple-400/50">
@@ -353,15 +368,15 @@ export function CallDetail({ callId }: CallDetailProps) {
         </div>
       )}
 
-      {/* Topics */}
-      {call.content?.topics && call.content.topics.length > 0 && (
+      {/* Topics (Gong only) */}
+      {gongRaw?.content?.topics && gongRaw.content.topics.length > 0 && (
         <div className="gradient-border rounded-2xl p-[1px]">
           <div className="glass rounded-2xl p-6">
             <h3 className="mb-3 flex items-center gap-2 text-base font-semibold">
               <Hash className="h-4 w-4 text-cyan-400" /> topics discussed
             </h3>
             <div className="flex flex-wrap gap-2">
-              {call.content.topics.map((t, i) => (
+              {gongRaw.content.topics.map((t, i) => (
                 <Badge
                   key={i}
                   variant="outline"
@@ -377,14 +392,14 @@ export function CallDetail({ callId }: CallDetailProps) {
       )}
 
       {/* Call Outcome */}
-      {call.content?.callOutcome && (
+      {call.outcome && (
         <div className="gradient-border rounded-2xl p-[1px]">
           <div className="glass rounded-2xl p-6">
             <h3 className="mb-3 flex items-center gap-2 text-base font-semibold">
               <Target className="h-4 w-4 text-orange-400" /> call outcome
             </h3>
             <Badge className="rounded-full border-0 bg-purple-500/15 px-3 py-1 text-sm text-purple-400">
-              {call.content.callOutcome}
+              {call.outcome}
             </Badge>
           </div>
         </div>
