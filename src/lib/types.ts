@@ -1,8 +1,18 @@
+export type Provider = "gong" | "salesloft";
+
 export interface GongCredentials {
   accessKey: string;
   accessKeySecret: string;
   baseUrl: string;
 }
+
+export interface SalesLoftCredentials {
+  apiKey: string;
+}
+
+export type Credentials =
+  | ({ provider: "gong" } & GongCredentials)
+  | ({ provider: "salesloft" } & SalesLoftCredentials);
 
 export interface GongParty {
   emailAddress?: string;
@@ -118,6 +128,84 @@ export interface GongApiError {
   errors?: Array<{ code: string; message: string }>;
 }
 
+// SalesLoft Conversations - raw payload shape (best-effort; fields are optional since
+// the exact schema is not fully documented on developers.salesloft.com pages).
+export interface SalesLoftParticipant {
+  name?: string;
+  email?: string;
+  phone_number?: string;
+  role?: string;
+  organization?: string;
+  user_id?: number | string;
+}
+
+export interface SalesLoftConversation {
+  id: number | string;
+  title?: string;
+  subject?: string;
+  started_at?: string;
+  created_at?: string;
+  updated_at?: string;
+  duration?: number; // seconds
+  direction?: string;
+  call_type?: string;
+  recording_url?: string;
+  recording_status?: string;
+  call_disposition?: string;
+  summary?: string;
+  participants?: SalesLoftParticipant[];
+  user?: { id: number | string; name?: string; email?: string };
+  to?: string;
+  from?: string;
+  account?: { id?: number | string; name?: string };
+}
+
+export interface SalesLoftListResponse<T> {
+  data: T[];
+  metadata?: {
+    paging?: {
+      per_page?: number;
+      current_page?: number;
+      next_page?: number | null;
+      prev_page?: number | null;
+    };
+  };
+}
+
+// Unified call shape returned to the UI from both providers.
+export interface NormalizedParty {
+  name?: string;
+  email?: string;
+  title?: string;
+  affiliation?: "Internal" | "External" | "Unknown";
+}
+
+export interface NormalizedCall {
+  provider: Provider;
+  id: string;
+  title: string;
+  started: string;
+  durationSec: number;
+  direction?: string;
+  system?: string;
+  scope?: string;
+  media?: "Video" | "Audio" | string;
+  url?: string;
+  audioUrl?: string;
+  videoUrl?: string;
+  parties: NormalizedParty[];
+  summary?: string;
+  outcome?: string;
+  language?: string;
+  raw: GongCall | SalesLoftConversation;
+}
+
+export interface NormalizedCallsResponse {
+  calls: NormalizedCall[];
+  cursor?: string;
+  totalRecords?: number;
+}
+
 export interface ApiResult<T> {
   data?: T;
   error?: string;
@@ -135,7 +223,7 @@ export interface ExportFilter {
 }
 
 export interface ExportRequestPayload {
-  credentials: GongCredentials;
+  credentials: Credentials;
   callIds?: string[];
   filter?: ExportFilter;
   options: ExportOptions;
@@ -143,6 +231,7 @@ export interface ExportRequestPayload {
 
 export interface ManifestRow {
   id: string;
+  provider: Provider;
   date: string;
   title: string;
   account: string;
