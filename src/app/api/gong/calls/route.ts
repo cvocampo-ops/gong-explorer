@@ -1,10 +1,11 @@
 import { NextRequest } from "next/server";
 import { fetchCalls } from "@/lib/gong-client";
-import type { GongCredentials } from "@/lib/types";
+import { gongToNormalized } from "@/lib/gong-normalize";
+import type { GongCredentials, NormalizedCallsResponse } from "@/lib/types";
 
 export async function POST(request: NextRequest) {
-  const body = await request.json() as {
-    credentials?: GongCredentials;
+  const body = (await request.json()) as {
+    credentials?: { provider?: string } & GongCredentials;
     cursor?: string;
     fromDate?: string;
     toDate?: string;
@@ -14,7 +15,13 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Missing credentials" }, { status: 400 });
   }
 
-  const result = await fetchCalls(body.credentials, {
+  const creds: GongCredentials = {
+    accessKey: body.credentials.accessKey,
+    accessKeySecret: body.credentials.accessKeySecret,
+    baseUrl: body.credentials.baseUrl,
+  };
+
+  const result = await fetchCalls(creds, {
     cursor: body.cursor,
     fromDate: body.fromDate,
     toDate: body.toDate,
@@ -27,12 +34,18 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  return Response.json(result.data, {
+  const normalized: NormalizedCallsResponse = {
+    calls: (result.data?.calls ?? []).map(gongToNormalized),
+    cursor: result.data?.records.cursor,
+    totalRecords: result.data?.records.totalRecords,
+  };
+
+  return Response.json(normalized, {
     headers: rateLimitHeaders(result.rateLimitRemaining),
   });
 }
 
 function rateLimitHeaders(remaining?: number): Record<string, string> {
   if (remaining === undefined) return {};
-  return { "X-Gong-RateLimit-Remaining": String(remaining) };
+  return { "X-RateLimit-Remaining": String(remaining) };
 }
