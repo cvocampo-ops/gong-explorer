@@ -72,7 +72,7 @@ export function CallList() {
   const [showDownloadAllDialog, setShowDownloadAllDialog] = useState(false);
 
   // Bulk download
-  const { state: downloadState, startDownload, cancel: cancelDownload, reset: resetDownload } = useBulkDownload();
+  const { state: downloadState, startDownload, startDownloadAll, cancel: cancelDownload, reset: resetDownload } = useBulkDownload();
 
   const loadCalls = useCallback(
     async (opts?: { append?: boolean; cursorOverride?: string }) => {
@@ -198,25 +198,16 @@ export function CallList() {
     setShowDownloadAllDialog(true);
   }
 
-  async function handleDownloadAllConfirm(options: {
+  function handleDownloadAllConfirm(options: {
     mediaType: MediaType;
     includeMetadata: boolean;
     includeTranscripts: boolean;
   }) {
     setShowDownloadAllDialog(false);
-    setIsDownloadingAll(true);
-    // API requires date range — use a wide range to get everything
-    const allTimeFrom = "2015-01-01T00:00:00Z";
-    const allTimeTo = new Date().toISOString();
-    const result = await fetchAllCalls(allTimeFrom, allTimeTo, {});
-    setIsDownloadingAll(false);
-
-    if (result.data && result.data.length > 0) {
-      startDownload(result.data, options.mediaType, {
-        includeMetadata: options.includeMetadata,
-        includeTranscripts: options.includeTranscripts,
-      });
-    }
+    startDownloadAll(options.mediaType, {
+      includeMetadata: options.includeMetadata,
+      includeTranscripts: options.includeTranscripts,
+    });
   }
 
   if (showImport && provider === "gong") {

@@ -123,6 +123,68 @@ export function useBulkDownload() {
     [credentials]
   );
 
+  const startDownloadAll = useCallback(
+    (mediaType: MediaType, extras?: BulkDownloadExtraOptions) => {
+      if (!credentials) {
+        setState({
+          status: "complete",
+          current: 0,
+          total: 0,
+          currentFile: "",
+          failures: [
+            { callId: "", callTitle: "", mediaType: "", error: "Not connected" },
+          ],
+        });
+        return;
+      }
+
+      setState({
+        status: "starting",
+        current: 0,
+        total: 0,
+        currentFile: "server is walking every call — this may take a few minutes...",
+        failures: [],
+      });
+
+      const payload: ExportRequestPayload = {
+        credentials,
+        filter: {},
+        options: {
+          includeMedia: true,
+          mediaType,
+          includeMetadata: extras?.includeMetadata ?? true,
+          includeTranscripts: extras?.includeTranscripts ?? false,
+        },
+      };
+
+      const form = document.createElement("form");
+      form.method = "POST";
+      form.action = "/api/export";
+      form.target = "_self";
+      form.enctype = "application/x-www-form-urlencoded";
+
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = "payload";
+      input.value = JSON.stringify(payload);
+      form.appendChild(input);
+      document.body.appendChild(form);
+      form.submit();
+      document.body.removeChild(form);
+
+      setTimeout(() => {
+        setState({
+          status: "complete",
+          current: 0,
+          total: 0,
+          currentFile: "",
+          failures: [],
+        });
+      }, 1500);
+    },
+    [credentials]
+  );
+
   const cancel = useCallback(() => {
     // Browser-native downloads can only be cancelled in the browser itself;
     // we just mirror that locally.
@@ -139,5 +201,5 @@ export function useBulkDownload() {
     });
   }, []);
 
-  return { state, startDownload, cancel, reset };
+  return { state, startDownload, startDownloadAll, cancel, reset };
 }
