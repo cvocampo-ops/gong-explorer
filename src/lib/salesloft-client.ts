@@ -6,8 +6,11 @@ import type {
   NormalizedParty,
   SalesLoftConversation,
   SalesLoftCredentials,
+  SalesLoftExtensiveConversation,
   SalesLoftListResponse,
   SalesLoftParticipant,
+  SalesLoftTranscriptionSentence,
+  SalesLoftTranscriptionSentencesResponse,
 } from "./types";
 
 const BASE_URL = "https://api.salesloft.com";
@@ -60,10 +63,10 @@ export async function fetchConversations(
   const params = new URLSearchParams();
   params.set("per_page", String(options?.perPage ?? 25));
   params.set("page", String(options?.page ?? 1));
-  params.set("sort_by", "started_at");
-  params.set("sort_direction", "DESC");
-  if (options?.fromDate) params.set("started_at[gt]", options.fromDate);
-  if (options?.toDate) params.set("started_at[lt]", options.toDate);
+  params.set("sort_by", "created_at");
+  params.set("sort_direction", "desc");
+  if (options?.fromDate) params.set("created_at[gt]", options.fromDate);
+  if (options?.toDate) params.set("created_at[lt]", options.toDate);
 
   try {
     const resp = await fetch(`${BASE_URL}/v2/conversations?${params}`, {
@@ -115,6 +118,59 @@ export async function fetchConversationById(
     const body = (await resp.json()) as { data: SalesLoftConversation };
     if (!body.data) return { error: "Conversation not found", rateLimitRemaining };
     return { data: toNormalizedCall(body.data), rateLimitRemaining };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return { error: `Network error: ${message}` };
+  }
+}
+
+export async function fetchConversationExtensive(
+  creds: SalesLoftCredentials,
+  id: string
+): Promise<ApiResult<SalesLoftExtensiveConversation>> {
+  try {
+    const resp = await fetch(
+      `${BASE_URL}/v2/conversations/${encodeURIComponent(id)}/extensive`,
+      {
+        method: "GET",
+        headers: { Authorization: authHeader(creds), Accept: "application/json" },
+      }
+    );
+    const rateLimitRemaining = parseRateLimit(resp);
+    if (resp.status === 429) {
+      const retryAfter = resp.headers.get("Retry-After");
+      return { error: `rate-limited:${retryAfter ?? "60"}`, rateLimitRemaining: 0 };
+    }
+    if (!resp.ok) return await handleError(resp, rateLimitRemaining);
+    const body = (await resp.json()) as { data: SalesLoftExtensiveConversation };
+    if (!body.data) return { error: "Conversation not found", rateLimitRemaining };
+    return { data: body.data, rateLimitRemaining };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return { error: `Network error: ${message}` };
+  }
+}
+
+export async function fetchTranscriptionSentences(
+  creds: SalesLoftCredentials,
+  transcriptionId: string
+): Promise<ApiResult<SalesLoftTranscriptionSentence[]>> {
+  try {
+    const resp = await fetch(
+      `${BASE_URL}/v2/transcriptions/${encodeURIComponent(transcriptionId)}/sentences?per_page=100`,
+      {
+        method: "GET",
+        headers: { Authorization: authHeader(creds), Accept: "application/json" },
+      }
+    );
+    const rateLimitRemaining = parseRateLimit(resp);
+    if (resp.status === 429) {
+      const retryAfter = resp.headers.get("Retry-After");
+      return { error: `rate-limited:${retryAfter ?? "60"}`, rateLimitRemaining: 0 };
+    }
+    if (!resp.ok) return await handleError(resp, rateLimitRemaining);
+    const body = (await resp.json()) as SalesLoftTranscriptionSentencesResponse;
+    return { data: body.data ?? [], rateLimitRemaining };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     return { error: `Network error: ${message}` };
