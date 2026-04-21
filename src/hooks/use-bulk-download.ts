@@ -57,24 +57,6 @@ export function useBulkDownload() {
         return;
       }
 
-      if (credentials.provider !== "gong") {
-        setState({
-          status: "complete",
-          current: 0,
-          total: 0,
-          currentFile: "",
-          failures: [
-            {
-              callId: "",
-              callTitle: "",
-              mediaType: "",
-              error: "Export is only supported for Gong right now",
-            },
-          ],
-        });
-        return;
-      }
-
       if (calls.length === 0) {
         setState({
           status: "complete",
@@ -113,7 +95,7 @@ export function useBulkDownload() {
 
       const form = document.createElement("form");
       form.method = "POST";
-      form.action = "/api/gong/export";
+      form.action = "/api/export";
       form.target = "_self";
       form.enctype = "application/x-www-form-urlencoded";
 
