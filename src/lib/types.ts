@@ -146,7 +146,7 @@ export interface SalesLoftConversation {
   started_at?: string;
   created_at?: string;
   updated_at?: string;
-  duration?: number; // seconds
+  duration?: number; // milliseconds (verified via live probe; Salesloft's field is ms despite looking like seconds)
   direction?: string;
   call_type?: string;
   recording_url?: string;

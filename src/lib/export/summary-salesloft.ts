@@ -37,7 +37,7 @@ export function renderSalesloftSummaryMarkdown(c: SalesLoftExtensiveConversation
   lines.push("");
   lines.push(`**Account:** ${account}`);
   if (started) lines.push(`**Date:** ${formatDateTime(started)}`);
-  if (typeof c.duration === "number") lines.push(`**Duration:** ${formatDuration(c.duration)}`);
+  if (typeof c.duration === "number") lines.push(`**Duration:** ${formatDuration(c.duration / 1000)}`);
   lines.push(`**System:** SalesLoft`);
   if (c.direction) lines.push(`**Direction:** ${c.direction}`);
   if (c.call_type) lines.push(`**Scope:** ${c.call_type}`);

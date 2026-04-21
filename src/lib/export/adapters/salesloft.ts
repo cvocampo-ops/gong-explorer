@@ -198,7 +198,7 @@ export const salesloftAdapter: ExportAdapter<SalesLoftCredentials, SalesLoftExte
       date,
       title,
       account,
-      duration_min: Math.round((c.duration ?? 0) / 60),
+      duration_min: Math.round((c.duration ?? 0) / 60000),
       direction: c.direction ?? "",
       system: "SalesLoft",
       internal_attendees: formatAttendees(c, "Internal"),
