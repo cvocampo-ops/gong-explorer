@@ -36,7 +36,7 @@ import type { MediaType } from "@/hooks/use-bulk-download";
 
 function defaultFromDate(): string {
   const d = new Date();
-  d.setDate(d.getDate() - 30);
+  d.setFullYear(d.getFullYear() - 2);
   return d.toISOString().split("T")[0];
 }
 
