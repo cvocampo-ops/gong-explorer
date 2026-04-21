@@ -133,10 +133,10 @@ Edit this file, replace the placeholders in the table below with what the probe 
 
 | Finding | Value (fill in) |
 |---|---|
-| Transcription reference field on `/extensive` response (e.g. `transcription_id`, `transcript_id`, `transcriptions[0].id`) | `<record>` |
-| Top-level shape of `/v2/transcriptions/:id/sentences` response (e.g. `{ data: [...] }` or `{ sentences: [...] }`) | `<record>` |
-| Sentence object keys (e.g. `speaker_id`, `text`, `start_time`, `end_time`) | `<record>` |
-| Does `/extensive` return `summary`, `action_items`, `key_moments` directly? Y/N and path | `<record>` |
+| Transcription reference field on `/extensive` response (e.g. `transcription_id`, `transcript_id`, `transcriptions[0].id`) | `data.transcription.id` — `/extensive` returns `transcription: { id: "08c91f48-...", _href: "..." }` (object, not a bare id field). Also present on the list endpoint. Access via `data.transcription?.id`. |
+| Top-level shape of `/v2/transcriptions/:id/sentences` response (e.g. `{ data: [...] }` or `{ sentences: [...] }`) | `{ data: [...], metadata: {...} }` — standard Salesloft envelope; sentences live under `data`. |
+| Sentence object keys (e.g. `speaker_id`, `text`, `start_time`, `end_time`) | `id`, `start_time` (float, seconds), `end_time` (float, seconds), `order_number`, `recording_attendee_id` (NOT `speaker_id`), `text`, `conversation: { id, _href }`. No `speaker_id` field — speaker is identified by `recording_attendee_id`. |
+| Does `/extensive` return `summary`, `action_items`, `key_moments` directly? Y/N and path | Yes — all three are top-level fields on `data`. `summary` is an object `{ id, text, status, created_at }` (text at `data.summary.text`). `action_items` is `{ status, items: [{ id, original_text, edited_text, created_at, updated_at }] }`. `key_moments` is `{ status, items: [{ name, categories: [...] }] }`. |
 
 - [ ] **Step 1.4: Commit**
 

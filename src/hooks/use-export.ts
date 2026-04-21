@@ -22,7 +22,7 @@ export function useExport() {
 
     const form = document.createElement("form");
     form.method = "POST";
-    form.action = "/api/gong/export";
+    form.action = "/api/export";
     form.target = "_self";
     form.enctype = "application/x-www-form-urlencoded";
 

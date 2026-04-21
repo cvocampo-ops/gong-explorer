@@ -129,7 +129,7 @@ export function CallDetail({ callId }: CallDetailProps) {
   // Gong-specific deep payload (for AI summary, highlights, etc).
   const gongRaw = provider === "gong" ? (call.raw as GongCall) : null;
   const isVideo = call.media === "Video";
-  const exportSupported = provider === "gong";
+  const exportSupported = provider === "gong" || provider === "salesloft";
 
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-8 sm:px-6">
