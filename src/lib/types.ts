@@ -161,8 +161,6 @@ export interface SalesLoftConversation {
   // Present on the /extensive response; absent on the list response.
   // Transcription is a nested object per Salesloft API (verified via probe).
   transcription?: { id: string; _href?: string };
-  action_items?: unknown;
-  key_moments?: unknown;
 }
 
 export interface SalesLoftListResponse<T> {
