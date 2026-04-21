@@ -24,11 +24,13 @@ import {
   MousePointerClick,
   Check,
   DownloadCloud,
+  Upload,
 } from "lucide-react";
 import type { NormalizedCall } from "@/lib/types";
 import { BulkDownloadBar } from "@/components/bulk-download-bar";
 import { BulkDownloadModal } from "@/components/bulk-download-modal";
 import { DownloadAllDialog } from "@/components/download-all-dialog";
+import { GongImport } from "@/components/gong-import";
 import { useBulkDownload } from "@/hooks/use-bulk-download";
 import type { MediaType } from "@/hooks/use-bulk-download";
 
@@ -47,6 +49,7 @@ export function CallList() {
   const { fetchCalls, fetchAllCalls } = useCallApi();
   const { isConfigured, provider } = useCredentials();
 
+  const [showImport, setShowImport] = useState(false);
   const [calls, setCalls] = useState<NormalizedCall[]>([]);
   const [cursor, setCursor] = useState<string | undefined>();
   const [loading, setLoading] = useState(false);
@@ -216,6 +219,10 @@ export function CallList() {
     }
   }
 
+  if (showImport && provider === "gong") {
+    return <GongImport onBack={() => setShowImport(false)} />;
+  }
+
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6 px-4 py-6 sm:px-6">
       {/* Background glow */}
@@ -300,6 +307,16 @@ export function CallList() {
                 <DownloadCloud className="mr-1.5 h-4 w-4" />
               )}
               {isDownloadingAll ? "loading..." : "download all"}
+            </Button>
+          )}
+          {provider === "gong" && (
+            <Button
+              variant="outline"
+              onClick={() => setShowImport(true)}
+              className="rounded-xl border-white/10 bg-white/5 px-4 hover:border-purple-500/30 hover:bg-purple-500/10 hover:text-purple-400"
+            >
+              <Upload className="mr-1.5 h-4 w-4" />
+              import
             </Button>
           )}
           <div className="ml-auto flex items-center gap-3 text-xs">

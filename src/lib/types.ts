@@ -224,6 +224,53 @@ export interface ExportFilter {
   toDate?: string;
 }
 
+// --- Import / Upload types ---
+
+export interface GongWorkspace {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+export interface GongWorkspacesResponse {
+  workspaces: GongWorkspace[];
+  requestId: string;
+}
+
+export interface ImportCallParty {
+  name?: string;
+  emailAddress?: string;
+  phoneNumber?: string;
+  userId?: string;
+}
+
+export interface ImportCallMetadata {
+  title?: string;
+  actualStart: string; // ISO 8601
+  direction: "Inbound" | "Outbound" | "Conference" | "Unknown";
+  system?: string;
+  purpose?: string;
+  parties: ImportCallParty[];
+  primaryUser: string; // Gong user email or ID
+  workspaceId?: string;
+  languageCode?: string;
+  customData?: string;
+  clientUniqueId: string;
+}
+
+export interface ImportRequest {
+  mode: "manual" | "automatic";
+  metadata: ImportCallMetadata;
+  sourceUrl?: string; // for automatic mode
+}
+
+export interface ImportResult {
+  callId: string;
+  gongUrl?: string;
+}
+
+// --- Export types ---
+
 export interface ExportRequestPayload {
   credentials: Credentials;
   callIds?: string[];

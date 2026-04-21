@@ -2,6 +2,9 @@ import "server-only";
 import type {
   GongCredentials,
   GongCallsResponse,
+  GongWorkspacesResponse,
+  ImportCallMetadata,
+  ImportResult,
   ApiResult,
 } from "./types";
 
@@ -301,4 +304,173 @@ export async function fetchTranscript(
     const message = err instanceof Error ? err.message : "Unknown error";
     return { error: `Network error: ${message}` };
   }
+}
+
+export async function fetchWorkspaces(
+  creds: GongCredentials
+): Promise<ApiResult<GongWorkspacesResponse>> {
+  const baseUrl = normalizeBaseUrl(creds.baseUrl);
+
+  try {
+    const resp = await fetch(`${baseUrl}/v2/workspaces`, {
+      method: "GET",
+      headers: {
+        Authorization: buildAuthHeader(creds),
+        "Content-Type": "application/json",
+      },
+    });
+
+    const rateLimitRemaining = resp.headers.get("X-RateLimit-Remaining")
+      ? Number(resp.headers.get("X-RateLimit-Remaining"))
+      : undefined;
+
+    if (!resp.ok) {
+      const body = await resp.text();
+      return { error: `Gong API error (${resp.status}): ${body}`, rateLimitRemaining };
+    }
+
+    const data = (await resp.json()) as GongWorkspacesResponse;
+    return { data, rateLimitRemaining };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return { error: `Network error: ${message}` };
+  }
+}
+
+export async function createCall(
+  creds: GongCredentials,
+  metadata: ImportCallMetadata
+): Promise<ApiResult<{ callId: string }>> {
+  const baseUrl = normalizeBaseUrl(creds.baseUrl);
+
+  const payload: Record<string, unknown> = {
+    actualStart: metadata.actualStart,
+    direction: metadata.direction,
+    system: metadata.system ?? "API Upload",
+    purpose: metadata.purpose ?? "Uploaded via Call Explorer",
+    parties: metadata.parties.map((p) => ({
+      ...(p.emailAddress && { emailAddress: p.emailAddress }),
+      ...(p.name && { name: p.name }),
+      ...(p.phoneNumber && { phoneNumber: p.phoneNumber }),
+      ...(p.userId && { userId: p.userId }),
+    })),
+    primaryUser: metadata.primaryUser,
+    clientUniqueId: metadata.clientUniqueId,
+    ...(metadata.title && { title: metadata.title }),
+    ...(metadata.workspaceId && { workspaceId: metadata.workspaceId }),
+    ...(metadata.languageCode && { languageCode: metadata.languageCode }),
+    ...(metadata.customData && { customData: metadata.customData }),
+  };
+
+  try {
+    const resp = await fetch(`${baseUrl}/v2/calls`, {
+      method: "POST",
+      headers: {
+        Authorization: buildAuthHeader(creds),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const rateLimitRemaining = resp.headers.get("X-RateLimit-Remaining")
+      ? Number(resp.headers.get("X-RateLimit-Remaining"))
+      : undefined;
+
+    if (!resp.ok) {
+      const body = await resp.text();
+      return { error: `Failed to create call (${resp.status}): ${body}`, rateLimitRemaining };
+    }
+
+    const data = (await resp.json()) as { callId: string; requestId: string };
+    return { data: { callId: data.callId }, rateLimitRemaining };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return { error: `Network error: ${message}` };
+  }
+}
+
+export async function uploadMedia(
+  creds: GongCredentials,
+  callId: string,
+  mediaBuffer: ArrayBuffer,
+  contentType: string
+): Promise<ApiResult<{ ok: true }>> {
+  const baseUrl = normalizeBaseUrl(creds.baseUrl);
+
+  try {
+    const resp = await fetch(`${baseUrl}/v2/calls/${encodeURIComponent(callId)}/media`, {
+      method: "PUT",
+      headers: {
+        Authorization: buildAuthHeader(creds),
+        "Content-Type": contentType,
+      },
+      body: mediaBuffer,
+    });
+
+    const rateLimitRemaining = resp.headers.get("X-RateLimit-Remaining")
+      ? Number(resp.headers.get("X-RateLimit-Remaining"))
+      : undefined;
+
+    if (!resp.ok) {
+      const body = await resp.text();
+      return { error: `Media upload failed (${resp.status}): ${body}`, rateLimitRemaining };
+    }
+
+    return { data: { ok: true }, rateLimitRemaining };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return { error: `Network error: ${message}` };
+  }
+}
+
+export async function importCall(
+  creds: GongCredentials,
+  metadata: ImportCallMetadata,
+  media: { buffer: ArrayBuffer; contentType: string } | { sourceUrl: string }
+): Promise<ApiResult<ImportResult>> {
+  // Step 1: Create the call record
+  const createResult = await createCall(creds, metadata);
+  if (createResult.error || !createResult.data) {
+    return { error: createResult.error ?? "Failed to create call", rateLimitRemaining: createResult.rateLimitRemaining };
+  }
+
+  const { callId } = createResult.data;
+
+  // Step 2: Get the media bytes
+  let buffer: ArrayBuffer;
+  let contentType: string;
+
+  if ("buffer" in media) {
+    buffer = media.buffer;
+    contentType = media.contentType;
+  } else {
+    try {
+      const mediaResp = await fetch(media.sourceUrl);
+      if (!mediaResp.ok) {
+        return { error: `Failed to fetch media from URL (${mediaResp.status}): ${mediaResp.statusText}` };
+      }
+      buffer = await mediaResp.arrayBuffer();
+      contentType = mediaResp.headers.get("Content-Type") ?? "application/octet-stream";
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      return { error: `Failed to download media from URL: ${message}` };
+    }
+  }
+
+  // Step 3: Upload media to the call
+  const uploadResult = await uploadMedia(creds, callId, buffer, contentType);
+  if (uploadResult.error) {
+    return { error: uploadResult.error, rateLimitRemaining: uploadResult.rateLimitRemaining };
+  }
+
+  // Build the Gong URL for the call
+  const baseHost = normalizeBaseUrl(creds.baseUrl)
+    .replace("https://", "")
+    .replace(".api.gong.io", ".app.gong.io");
+  const gongUrl = `https://${baseHost}/call?id=${callId}`;
+
+  return {
+    data: { callId, gongUrl },
+    rateLimitRemaining: uploadResult.rateLimitRemaining,
+  };
 }
