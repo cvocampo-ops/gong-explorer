@@ -158,6 +158,11 @@ export interface SalesLoftConversation {
   to?: string;
   from?: string;
   account?: { id?: number | string; name?: string };
+  // Present on the /extensive response; absent on the list response.
+  // Transcription is a nested object per Salesloft API (verified via probe).
+  transcription?: { id: string; _href?: string };
+  action_items?: unknown;
+  key_moments?: unknown;
 }
 
 export interface SalesLoftListResponse<T> {
@@ -170,6 +175,43 @@ export interface SalesLoftListResponse<T> {
       prev_page?: number | null;
     };
   };
+}
+
+// /v2/conversations/:id/extensive response shape. Separate from SalesLoftConversation
+// because /extensive returns nested objects for summary/action_items/key_moments that
+// the list endpoint returns flat (or omits entirely).
+export interface SalesLoftExtensiveConversation
+  extends Omit<SalesLoftConversation, "summary"> {
+  summary?: {
+    id?: string;
+    text?: string;
+    status?: string;
+    created_at?: string;
+  };
+  action_items?: {
+    status?: string;
+    items?: Array<{ id?: string; original_text?: string }>;
+  };
+  key_moments?: {
+    status?: string;
+    items?: Array<{ name?: string; categories?: Array<unknown> }>;
+  };
+}
+
+export interface SalesLoftTranscriptionSentence {
+  id?: string;
+  text?: string;
+  start_time?: number;
+  end_time?: number;
+  order_number?: number;
+  // Speaker identity on Salesloft transcriptions is the attendee id, NOT a speaker_id.
+  recording_attendee_id?: string;
+  conversation?: { id?: string; _href?: string };
+}
+
+export interface SalesLoftTranscriptionSentencesResponse {
+  data?: SalesLoftTranscriptionSentence[];
+  metadata?: { paging?: { per_page?: number; current_page?: number; next_page?: number | null } };
 }
 
 // Unified call shape returned to the UI from both providers.
