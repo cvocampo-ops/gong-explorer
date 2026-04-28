@@ -24,6 +24,9 @@ import {
   Zap,
   FolderOpen,
   ArrowLeft,
+  Archive,
+  XCircle,
+  MinusCircle,
 } from "lucide-react";
 
 const ACCEPTED_EXTENSIONS = ".wav,.mp3,.mp4,.mkv,.flac";
@@ -59,13 +62,14 @@ export function GongImport({ onBack }: GongImportProps) {
     importState,
     importManual,
     importAutomatic,
+    importZip,
     resetImport,
   } = useGongImport();
 
   // Mode toggle
-  const [mode, setMode] = useState<"manual" | "automatic">("manual");
+  const [mode, setMode] = useState<"manual" | "automatic" | "zip">("manual");
 
-  // File state (manual)
+  // File state (manual + zip)
   const [file, setFile] = useState<File | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -105,6 +109,9 @@ export function GongImport({ onBack }: GongImportProps) {
   }
 
   function isAcceptedFile(f: File): boolean {
+    if (mode === "zip") {
+      return f.name.toLowerCase().endsWith(".zip") || f.type === "application/zip";
+    }
     if (ACCEPTED_TYPES.includes(f.type)) return true;
     const ext = f.name.split(".").pop()?.toLowerCase();
     return ["wav", "mp3", "mp4", "mkv", "flac"].includes(ext ?? "");
@@ -141,6 +148,12 @@ export function GongImport({ onBack }: GongImportProps) {
   }
 
   async function handleSubmit() {
+    if (mode === "zip") {
+      if (!file) return;
+      await importZip(file, workspaceId ? { workspaceId } : undefined);
+      return;
+    }
+
     if (!primaryUser.trim()) return;
 
     const metadata = buildMetadata();
@@ -153,11 +166,95 @@ export function GongImport({ onBack }: GongImportProps) {
   }
 
   const canSubmit =
-    primaryUser.trim() &&
-    ((mode === "manual" && file) || (mode === "automatic" && sourceUrl.trim())) &&
+    ((mode === "zip" && file) ||
+      (mode === "manual" && file && primaryUser.trim()) ||
+      (mode === "automatic" && sourceUrl.trim() && primaryUser.trim())) &&
     importState.status !== "uploading";
 
-  // Success view
+  // Bulk success view (full-export ZIP)
+  if (importState.status === "success" && importState.bulk) {
+    const { summary, rows } = importState.bulk;
+    return (
+      <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-6 sm:px-6">
+        <div className="gradient-border rounded-xl p-[1px]">
+          <div className="glass rounded-xl p-6">
+            <div className="mb-5 flex items-center gap-4">
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-green-500/10">
+                <Archive className="h-6 w-6 text-green-400" />
+              </div>
+              <div>
+                <h3 className="text-xl font-bold">bulk import complete</h3>
+                <p className="text-sm text-muted-foreground">
+                  {summary.succeeded} of {summary.total} calls imported
+                  {summary.failed > 0 && ` · ${summary.failed} failed`}
+                  {summary.skipped > 0 && ` · ${summary.skipped} skipped`}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              {rows.map((row) => (
+                <div
+                  key={row.folder}
+                  className="flex items-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2"
+                >
+                  {row.status === "ok" && (
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-green-400" />
+                  )}
+                  {row.status === "error" && (
+                    <XCircle className="h-4 w-4 shrink-0 text-red-400" />
+                  )}
+                  {row.status === "skipped" && (
+                    <MinusCircle className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">
+                      {row.title ?? row.folder}
+                    </p>
+                    <p className="truncate text-xs text-muted-foreground">
+                      {row.folder}
+                      {row.error && ` — ${row.error}`}
+                    </p>
+                  </div>
+                  {row.gongUrl && (
+                    <a
+                      href={row.gongUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="shrink-0 rounded-md border border-purple-500/30 bg-purple-500/10 px-2 py-1 text-xs text-purple-400 hover:bg-purple-500/20"
+                    >
+                      open
+                    </a>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-6 flex justify-center gap-3">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  resetImport();
+                  setFile(null);
+                }}
+                className="rounded-xl border-white/10 bg-white/5"
+              >
+                import another
+              </Button>
+              <Button
+                onClick={onBack}
+                className="gradient-btn rounded-xl border-0 text-white"
+              >
+                back to calls
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Single-call success view
   if (importState.status === "success" && importState.result) {
     return (
       <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6 sm:px-6">
@@ -272,7 +369,10 @@ export function GongImport({ onBack }: GongImportProps) {
           <div className="gradient-border rounded-xl p-[1px]">
             <div className="glass flex gap-1 rounded-xl p-1">
               <button
-                onClick={() => setMode("manual")}
+                onClick={() => {
+                  setMode("manual");
+                  setFile(null);
+                }}
                 className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all ${
                   mode === "manual"
                     ? "bg-purple-500/20 text-purple-400"
@@ -280,10 +380,13 @@ export function GongImport({ onBack }: GongImportProps) {
                 }`}
               >
                 <Upload className="h-4 w-4" />
-                manual upload
+                manual
               </button>
               <button
-                onClick={() => setMode("automatic")}
+                onClick={() => {
+                  setMode("automatic");
+                  setFile(null);
+                }}
                 className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all ${
                   mode === "automatic"
                     ? "bg-purple-500/20 text-purple-400"
@@ -293,11 +396,25 @@ export function GongImport({ onBack }: GongImportProps) {
                 <Link className="h-4 w-4" />
                 from URL
               </button>
+              <button
+                onClick={() => {
+                  setMode("zip");
+                  setFile(null);
+                }}
+                className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all ${
+                  mode === "zip"
+                    ? "bg-purple-500/20 text-purple-400"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Archive className="h-4 w-4" />
+                from ZIP export
+              </button>
             </div>
           </div>
 
-          {/* File upload area (manual) */}
-          {mode === "manual" && (
+          {/* File upload area (manual + zip) */}
+          {(mode === "manual" || mode === "zip") && (
             <div className="gradient-border rounded-xl p-[1px]">
               <div
                 onDragEnter={handleDrag}
@@ -316,7 +433,7 @@ export function GongImport({ onBack }: GongImportProps) {
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept={ACCEPTED_EXTENSIONS}
+                  accept={mode === "zip" ? ".zip,application/zip" : ACCEPTED_EXTENSIONS}
                   onChange={handleFileSelect}
                   className="hidden"
                 />
@@ -324,7 +441,11 @@ export function GongImport({ onBack }: GongImportProps) {
                 {file ? (
                   <div className="flex w-full items-center gap-4">
                     <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-purple-500/20">
-                      <FileVideo className="h-5 w-5 text-purple-400" />
+                      {mode === "zip" ? (
+                        <Archive className="h-5 w-5 text-purple-400" />
+                      ) : (
+                        <FileVideo className="h-5 w-5 text-purple-400" />
+                      )}
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="truncate font-medium">{file.name}</p>
@@ -347,14 +468,20 @@ export function GongImport({ onBack }: GongImportProps) {
                 ) : (
                   <>
                     <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-white/5">
-                      <Upload className="h-5 w-5 text-muted-foreground" />
+                      {mode === "zip" ? (
+                        <Archive className="h-5 w-5 text-muted-foreground" />
+                      ) : (
+                        <Upload className="h-5 w-5 text-muted-foreground" />
+                      )}
                     </div>
                     <p className="text-sm font-medium">
                       drop your file here or{" "}
                       <span className="text-purple-400">browse</span>
                     </p>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      WAV, MP3, MP4, MKV, FLAC up to 1.5 GB
+                      {mode === "zip"
+                        ? "ZIP: single call folder OR full export with manifest.json"
+                        : "WAV, MP3, MP4, MKV, FLAC up to 1.5 GB"}
                     </p>
                   </>
                 )}
@@ -387,7 +514,46 @@ export function GongImport({ onBack }: GongImportProps) {
             </div>
           )}
 
-          {/* Call metadata */}
+          {/* ZIP-mode notice + workspace override */}
+          {mode === "zip" && (
+            <div className="gradient-border rounded-xl p-[1px]">
+              <div className="glass space-y-4 rounded-xl p-4">
+                <div className="flex items-start gap-2">
+                  <Info className="mt-0.5 h-4 w-4 shrink-0 text-purple-400" />
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    Call title, date, parties, primary user, system, and language are
+                    read from each <code className="rounded bg-white/5 px-1 py-0.5 font-mono text-[10px]">metadata.json</code>{" "}
+                    inside the archive. Only Workspace can be overridden here.
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="workspace-zip" className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    Workspace (override)
+                  </Label>
+                  <select
+                    id="workspace-zip"
+                    value={workspaceId}
+                    onChange={(e) => setWorkspaceId(e.target.value)}
+                    disabled={workspacesLoading}
+                    className="flex h-9 w-full rounded-lg border border-white/10 bg-white/5 px-3 py-1 text-sm text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+                  >
+                    <option value="">
+                      {workspacesLoading ? "Loading workspaces..." : "Use workspace from metadata.json"}
+                    </option>
+                    {workspaces.map((ws) => (
+                      <option key={ws.id} value={ws.id}>
+                        {ws.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Call metadata (manual + URL only) */}
+          {mode !== "zip" && (
           <div className="gradient-border rounded-xl p-[1px]">
             <div className="glass space-y-4 rounded-xl p-4">
               <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
@@ -499,6 +665,7 @@ export function GongImport({ onBack }: GongImportProps) {
               </div>
             </div>
           </div>
+          )}
 
           {/* Error */}
           {importState.status === "error" && (
@@ -521,8 +688,16 @@ export function GongImport({ onBack }: GongImportProps) {
               </>
             ) : (
               <>
-                <Upload className="mr-2 h-4 w-4" />
-                {mode === "manual" ? "upload to gong" : "import from URL"}
+                {mode === "zip" ? (
+                  <Archive className="mr-2 h-4 w-4" />
+                ) : (
+                  <Upload className="mr-2 h-4 w-4" />
+                )}
+                {mode === "manual"
+                  ? "upload to gong"
+                  : mode === "automatic"
+                  ? "import from URL"
+                  : "import ZIP to gong"}
               </>
             )}
           </Button>

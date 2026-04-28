@@ -1,9 +1,11 @@
 import "server-only";
+import { createHash } from "node:crypto";
 import type {
   GongCredentials,
   GongCallsResponse,
   GongWorkspacesResponse,
   ImportCallMetadata,
+  ImportCallParty,
   ImportResult,
   ApiResult,
 } from "./types";
@@ -337,30 +339,159 @@ export async function fetchWorkspaces(
   }
 }
 
+interface GongUser {
+  id: string;
+  emailAddress?: string;
+  firstName?: string;
+  lastName?: string;
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const USER_LOOKUP_PAGE_CAP = 20;
+
+export async function findUserByEmail(
+  creds: GongCredentials,
+  email: string
+): Promise<GongUser | null> {
+  const baseUrl = normalizeBaseUrl(creds.baseUrl);
+  const target = email.trim().toLowerCase();
+  let cursor: string | undefined;
+
+  for (let page = 0; page < USER_LOOKUP_PAGE_CAP; page++) {
+    const url = new URL(`${baseUrl}/v2/users`);
+    if (cursor) url.searchParams.set("cursor", cursor);
+
+    const resp = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        Authorization: buildAuthHeader(creds),
+        "Content-Type": "application/json",
+      },
+    });
+
+    if (!resp.ok) return null;
+
+    const data = (await resp.json()) as {
+      users?: GongUser[];
+      records?: { cursor?: string };
+    };
+
+    const match = data.users?.find(
+      (u) => u.emailAddress && u.emailAddress.toLowerCase() === target
+    );
+    if (match) return match;
+
+    cursor = data.records?.cursor;
+    if (!cursor) return null;
+  }
+
+  return null;
+}
+
+function isLikelyEmail(value: string): boolean {
+  return EMAIL_RE.test(value.trim());
+}
+
+function deterministicPartyHash(party: ImportCallParty, index: number): string {
+  const seed =
+    party.emailAddress?.toLowerCase() ||
+    party.phoneNumber ||
+    party.name ||
+    `import-party-${index}`;
+  return createHash("sha1").update(seed).digest("hex").slice(0, 32);
+}
+
+function normalizeParty(
+  party: ImportCallParty,
+  index: number
+): ImportCallParty | null {
+  // Drop completely empty parties.
+  if (
+    !party.userId &&
+    !party.partyHash &&
+    !party.emailAddress &&
+    !party.name &&
+    !party.phoneNumber
+  ) {
+    return null;
+  }
+
+  const out: ImportCallParty = {};
+  if (party.userId) out.userId = party.userId;
+  // Only synthesize partyHash when there is no userId.
+  if (!party.userId) {
+    out.partyHash = party.partyHash ?? deterministicPartyHash(party, index);
+  }
+  if (typeof party.mediaChannelId === "number") out.mediaChannelId = party.mediaChannelId;
+  if (party.name) out.name = party.name;
+  if (party.emailAddress) out.emailAddress = party.emailAddress;
+  if (party.phoneNumber) out.phoneNumber = party.phoneNumber;
+  if (party.title) out.title = party.title;
+  if (party.affiliation) out.affiliation = party.affiliation;
+  if (party.methods && party.methods.length > 0) out.methods = party.methods;
+  if (party.context) out.context = party.context;
+  return out;
+}
+
 export async function createCall(
   creds: GongCredentials,
   metadata: ImportCallMetadata
 ): Promise<ApiResult<{ callId: string }>> {
   const baseUrl = normalizeBaseUrl(creds.baseUrl);
 
+  // 1. Resolve primary user — accept email or userId, but Gong needs userId.
+  let primaryUserId = metadata.primaryUser;
+  let primaryUserEmail: string | undefined;
+  let primaryUserName: string | undefined;
+
+  if (isLikelyEmail(metadata.primaryUser)) {
+    const user = await findUserByEmail(creds, metadata.primaryUser);
+    if (!user) {
+      return {
+        error: `No Gong user found for email ${metadata.primaryUser}. Provide the Gong userId or invite this email as a Gong user.`,
+      };
+    }
+    primaryUserId = user.id;
+    primaryUserEmail = user.emailAddress ?? metadata.primaryUser;
+    primaryUserName =
+      [user.firstName, user.lastName].filter(Boolean).join(" ") || undefined;
+  }
+
+  // 2. Normalize incoming parties (drop empties, ensure partyHash for non-userId parties).
+  const normalized = metadata.parties
+    .map((p, i) => normalizeParty(p, i))
+    .filter((p): p is ImportCallParty => p !== null);
+
+  // 3. Guarantee a party for the primary user.
+  if (!normalized.some((p) => p.userId === primaryUserId)) {
+    normalized.unshift({
+      userId: primaryUserId,
+      affiliation: "Internal",
+      ...(primaryUserEmail && { emailAddress: primaryUserEmail }),
+      ...(primaryUserName && { name: primaryUserName }),
+    });
+  }
+
+  // 4. Build the outgoing payload with an explicit whitelist.
   const payload: Record<string, unknown> = {
+    clientUniqueId: metadata.clientUniqueId,
     actualStart: metadata.actualStart,
     direction: metadata.direction,
-    system: metadata.system ?? "API Upload",
-    purpose: metadata.purpose ?? "Uploaded via Call Explorer",
-    parties: metadata.parties.map((p) => ({
-      ...(p.emailAddress && { emailAddress: p.emailAddress }),
-      ...(p.name && { name: p.name }),
-      ...(p.phoneNumber && { phoneNumber: p.phoneNumber }),
-      ...(p.userId && { userId: p.userId }),
-    })),
-    primaryUser: metadata.primaryUser,
-    clientUniqueId: metadata.clientUniqueId,
-    ...(metadata.title && { title: metadata.title }),
-    ...(metadata.workspaceId && { workspaceId: metadata.workspaceId }),
-    ...(metadata.languageCode && { languageCode: metadata.languageCode }),
-    ...(metadata.customData && { customData: metadata.customData }),
+    primaryUser: primaryUserId,
+    parties: normalized,
   };
+
+  if (metadata.title) payload.title = metadata.title;
+  if (metadata.purpose) payload.purpose = metadata.purpose;
+  if (metadata.system) payload.system = metadata.system;
+  if (metadata.scheduledStart) payload.scheduledStart = metadata.scheduledStart;
+  if (metadata.scheduledEnd) payload.scheduledEnd = metadata.scheduledEnd;
+  if (metadata.meetingUrl) payload.meetingUrl = metadata.meetingUrl;
+  if (metadata.workspaceId) payload.workspaceId = metadata.workspaceId;
+  if (metadata.languageCode) payload.languageCode = metadata.languageCode;
+  if (metadata.customData) payload.customData = metadata.customData;
+  if (metadata.disposition) payload.disposition = metadata.disposition;
+  if (metadata.callProviderCode) payload.callProviderCode = metadata.callProviderCode;
 
   try {
     const resp = await fetch(`${baseUrl}/v2/calls`, {

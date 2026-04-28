@@ -278,35 +278,61 @@ export interface GongWorkspacesResponse {
 }
 
 export interface ImportCallParty {
+  userId?: string;
+  partyHash?: string;
+  mediaChannelId?: number;
   name?: string;
   emailAddress?: string;
   phoneNumber?: string;
-  userId?: string;
+  title?: string;
+  affiliation?: "Internal" | "External" | "Unknown";
+  methods?: Array<"Invitee" | "Attendee" | "Organizer">;
+  context?: GongParty["context"];
 }
 
 export interface ImportCallMetadata {
-  title?: string;
-  actualStart: string; // ISO 8601
+  clientUniqueId: string;
+  actualStart: string; // ISO 8601 with offset
   direction: "Inbound" | "Outbound" | "Conference" | "Unknown";
-  system?: string;
-  purpose?: string;
+  primaryUser: string; // Gong user email OR Gong userId; resolved server-side
   parties: ImportCallParty[];
-  primaryUser: string; // Gong user email or ID
+  title?: string;
+  purpose?: string;
+  system?: string;
+  scheduledStart?: string;
+  scheduledEnd?: string;
+  meetingUrl?: string;
   workspaceId?: string;
   languageCode?: string;
   customData?: string;
-  clientUniqueId: string;
+  disposition?: string;
+  callProviderCode?: string;
 }
 
 export interface ImportRequest {
-  mode: "manual" | "automatic";
-  metadata: ImportCallMetadata;
-  sourceUrl?: string; // for automatic mode
+  mode: "manual" | "automatic" | "zip";
+  metadata?: ImportCallMetadata;
+  sourceUrl?: string;
 }
 
 export interface ImportResult {
   callId: string;
   gongUrl?: string;
+}
+
+// Result row for a bulk (full-export ZIP) import.
+export interface BulkImportRow {
+  folder: string;
+  status: "ok" | "error" | "skipped";
+  callId?: string;
+  gongUrl?: string;
+  title?: string;
+  error?: string;
+}
+
+export interface BulkImportResult {
+  summary: { total: number; succeeded: number; failed: number; skipped: number };
+  rows: BulkImportRow[];
 }
 
 // --- Export types ---

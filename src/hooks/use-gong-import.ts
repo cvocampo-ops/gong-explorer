@@ -2,14 +2,26 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useCredentials } from "@/components/credential-provider";
-import type { GongWorkspace, ImportCallMetadata, ImportResult } from "@/lib/types";
+import type {
+  GongWorkspace,
+  ImportCallMetadata,
+  ImportResult,
+  BulkImportResult,
+} from "@/lib/types";
 
 export type ImportStatus = "idle" | "uploading" | "success" | "error";
+
+export interface ZipOverrides {
+  workspaceId?: string;
+  title?: string;
+  primaryUser?: string;
+}
 
 interface ImportState {
   status: ImportStatus;
   error: string;
   result: ImportResult | null;
+  bulk: BulkImportResult | null;
   progress: string;
 }
 
@@ -24,6 +36,7 @@ export function useGongImport() {
     status: "idle",
     error: "",
     result: null,
+    bulk: null,
     progress: "",
   });
 
@@ -70,33 +83,43 @@ export function useGongImport() {
   ): Promise<void> {
     if (!credentials || credentials.provider !== "gong") return;
 
-    setImportState({ status: "uploading", error: "", result: null, progress: "Creating call record..." });
+    setImportState({
+      status: "uploading",
+      error: "",
+      result: null,
+      bulk: null,
+      progress: "Creating call record...",
+    });
 
     try {
       const formData = new FormData();
       formData.append("credentials", JSON.stringify(credentials));
       formData.append("metadata", JSON.stringify(metadata));
       formData.append("file", file);
+      formData.append("mode", "manual");
 
       setImportState((prev) => ({ ...prev, progress: "Uploading media to Gong..." }));
 
-      const resp = await fetch("/api/gong/import", {
-        method: "POST",
-        body: formData,
-      });
+      const resp = await fetch("/api/gong/import", { method: "POST", body: formData });
 
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
         const error = (body as { error?: string }).error ?? `Import failed (${resp.status})`;
-        setImportState({ status: "error", error, result: null, progress: "" });
+        setImportState({ status: "error", error, result: null, bulk: null, progress: "" });
         return;
       }
 
       const result = (await resp.json()) as ImportResult;
-      setImportState({ status: "success", error: "", result, progress: "" });
+      setImportState({ status: "success", error: "", result, bulk: null, progress: "" });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      setImportState({ status: "error", error: `Network error: ${message}`, result: null, progress: "" });
+      setImportState({
+        status: "error",
+        error: `Network error: ${message}`,
+        result: null,
+        bulk: null,
+        progress: "",
+      });
     }
   }
 
@@ -106,7 +129,13 @@ export function useGongImport() {
   ): Promise<void> {
     if (!credentials || credentials.provider !== "gong") return;
 
-    setImportState({ status: "uploading", error: "", result: null, progress: "Fetching media from URL..." });
+    setImportState({
+      status: "uploading",
+      error: "",
+      result: null,
+      bulk: null,
+      progress: "Fetching media from URL...",
+    });
 
     try {
       const resp = await fetch("/api/gong/import", {
@@ -118,20 +147,83 @@ export function useGongImport() {
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
         const error = (body as { error?: string }).error ?? `Import failed (${resp.status})`;
-        setImportState({ status: "error", error, result: null, progress: "" });
+        setImportState({ status: "error", error, result: null, bulk: null, progress: "" });
         return;
       }
 
       const result = (await resp.json()) as ImportResult;
-      setImportState({ status: "success", error: "", result, progress: "" });
+      setImportState({ status: "success", error: "", result, bulk: null, progress: "" });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Unknown error";
-      setImportState({ status: "error", error: `Network error: ${message}`, result: null, progress: "" });
+      setImportState({
+        status: "error",
+        error: `Network error: ${message}`,
+        result: null,
+        bulk: null,
+        progress: "",
+      });
+    }
+  }
+
+  async function importZip(file: File, overrides?: ZipOverrides): Promise<void> {
+    if (!credentials || credentials.provider !== "gong") return;
+
+    setImportState({
+      status: "uploading",
+      error: "",
+      result: null,
+      bulk: null,
+      progress: "Reading ZIP and uploading to Gong...",
+    });
+
+    try {
+      const formData = new FormData();
+      formData.append("credentials", JSON.stringify(credentials));
+      formData.append("file", file);
+      formData.append("mode", "zip");
+      if (overrides) formData.append("overrides", JSON.stringify(overrides));
+
+      const resp = await fetch("/api/gong/import", { method: "POST", body: formData });
+
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        const error = (body as { error?: string }).error ?? `Import failed (${resp.status})`;
+        setImportState({ status: "error", error, result: null, bulk: null, progress: "" });
+        return;
+      }
+
+      const data = (await resp.json()) as ImportResult | BulkImportResult;
+      if ("rows" in data) {
+        setImportState({
+          status: "success",
+          error: "",
+          result: null,
+          bulk: data,
+          progress: "",
+        });
+      } else {
+        setImportState({
+          status: "success",
+          error: "",
+          result: data,
+          bulk: null,
+          progress: "",
+        });
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setImportState({
+        status: "error",
+        error: `Network error: ${message}`,
+        result: null,
+        bulk: null,
+        progress: "",
+      });
     }
   }
 
   function resetImport() {
-    setImportState({ status: "idle", error: "", result: null, progress: "" });
+    setImportState({ status: "idle", error: "", result: null, bulk: null, progress: "" });
   }
 
   return {
@@ -141,6 +233,7 @@ export function useGongImport() {
     importState,
     importManual,
     importAutomatic,
+    importZip,
     resetImport,
     refetchWorkspaces: fetchWorkspaces,
   };
