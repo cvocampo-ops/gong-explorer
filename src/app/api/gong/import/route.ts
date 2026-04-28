@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import JSZip from "jszip";
+import { del as deleteBlob } from "@vercel/blob";
 import { importCall } from "@/lib/gong-client";
 import {
   mapExportToImportMetadata,
@@ -79,16 +80,52 @@ export async function POST(request: NextRequest) {
     return handleManualImport(file, credentials, formData.get("metadata"));
   }
 
-  // --- JSON mode (automatic from URL) ---
+  // --- JSON modes ---
   const body = (await request.json()) as {
+    mode?: "automatic" | "zip" | "manual";
     credentials?: { provider?: string } & GongCredentials;
     metadata?: ImportCallMetadata;
     sourceUrl?: string;
+    blobUrl?: string;
+    contentType?: string;
+    overrides?: MapperOverrides;
   };
 
   if (!body.credentials?.accessKey || !body.credentials?.accessKeySecret || !body.credentials?.baseUrl) {
     return Response.json({ error: "Missing credentials" }, { status: 400 });
   }
+
+  const creds: GongCredentials = {
+    accessKey: body.credentials.accessKey,
+    accessKeySecret: body.credentials.accessKeySecret,
+    baseUrl: body.credentials.baseUrl,
+  };
+
+  const mode = body.mode ?? (body.sourceUrl ? "automatic" : undefined);
+
+  if (mode === "zip") {
+    if (!body.blobUrl) {
+      return Response.json({ error: "Missing blobUrl for ZIP import" }, { status: 400 });
+    }
+    return handleZipFromBlob(body.blobUrl, creds, body.overrides);
+  }
+
+  if (mode === "manual") {
+    if (!body.blobUrl) {
+      return Response.json({ error: "Missing blobUrl for manual import" }, { status: 400 });
+    }
+    if (!body.metadata) {
+      return Response.json({ error: "Missing call metadata" }, { status: 400 });
+    }
+    return handleManualFromBlob(
+      body.blobUrl,
+      body.contentType ?? "application/octet-stream",
+      creds,
+      body.metadata
+    );
+  }
+
+  // mode === "automatic"
   if (!body.metadata) {
     return Response.json({ error: "Missing call metadata" }, { status: 400 });
   }
@@ -99,13 +136,125 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const creds: GongCredentials = {
-    accessKey: body.credentials.accessKey,
-    accessKeySecret: body.credentials.accessKeySecret,
-    baseUrl: body.credentials.baseUrl,
-  };
-
   const result = await importCall(creds, body.metadata, { sourceUrl: body.sourceUrl });
+  if (result.error) {
+    return Response.json({ error: result.error }, { status: 502 });
+  }
+  return Response.json(result.data);
+}
+
+async function fetchBlobBuffer(blobUrl: string): Promise<ArrayBuffer> {
+  const resp = await fetch(blobUrl);
+  if (!resp.ok) {
+    throw new Error(`Failed to fetch blob (${resp.status}): ${resp.statusText}`);
+  }
+  return resp.arrayBuffer();
+}
+
+async function tryDeleteBlob(blobUrl: string): Promise<void> {
+  try {
+    await deleteBlob(blobUrl);
+  } catch {
+    // Best-effort cleanup; don't fail the import if cleanup fails.
+  }
+}
+
+async function handleManualFromBlob(
+  blobUrl: string,
+  contentType: string,
+  creds: GongCredentials,
+  metadata: ImportCallMetadata
+) {
+  let buffer: ArrayBuffer;
+  try {
+    buffer = await fetchBlobBuffer(blobUrl);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return Response.json({ error: message }, { status: 502 });
+  }
+
+  if (buffer.byteLength > MAX_FILE_SIZE) {
+    await tryDeleteBlob(blobUrl);
+    return Response.json({ error: "File exceeds 1.5 GB limit." }, { status: 400 });
+  }
+
+  const result = await importCall(creds, metadata, { buffer, contentType });
+  await tryDeleteBlob(blobUrl);
+
+  if (result.error) {
+    return Response.json({ error: result.error }, { status: 502 });
+  }
+  return Response.json(result.data);
+}
+
+async function handleZipFromBlob(
+  blobUrl: string,
+  creds: GongCredentials,
+  overrides: MapperOverrides | undefined
+) {
+  let buffer: ArrayBuffer;
+  try {
+    buffer = await fetchBlobBuffer(blobUrl);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return Response.json({ error: message }, { status: 502 });
+  }
+
+  let zip: JSZip;
+  try {
+    zip = await JSZip.loadAsync(buffer);
+  } catch (err) {
+    await tryDeleteBlob(blobUrl);
+    const message = err instanceof Error ? err.message : "Unknown error";
+    return Response.json({ error: `Failed to read ZIP: ${message}` }, { status: 400 });
+  }
+
+  const manifestEntry = findManifestEntry(zip);
+  let response: Response;
+  if (manifestEntry) {
+    response = await runFullExportImport(zip, manifestEntry, creds, overrides);
+  } else {
+    response = await runSingleCallImport(zip, creds, overrides);
+  }
+
+  await tryDeleteBlob(blobUrl);
+  return response;
+}
+
+async function runSingleCallImport(
+  zip: JSZip,
+  creds: GongCredentials,
+  overrides: MapperOverrides | undefined
+): Promise<Response> {
+  const single = await extractSingleCall(zip);
+  if (!single) {
+    return Response.json(
+      {
+        error:
+          "ZIP must contain either a metadata.json (single call) or manifest.json (full export).",
+      },
+      { status: 400 }
+    );
+  }
+
+  const metadata = mapExportToImportMetadata(single.raw, overrides);
+  if (!metadata.primaryUser) {
+    return Response.json(
+      { error: "metadata.json is missing primaryUserId; cannot import." },
+      { status: 400 }
+    );
+  }
+  if (single.media.byteLength > MAX_FILE_SIZE) {
+    return Response.json(
+      { error: "Recording inside ZIP exceeds 1.5 GB limit." },
+      { status: 400 }
+    );
+  }
+
+  const result = await importCall(creds, metadata, {
+    buffer: single.media,
+    contentType: single.contentType,
+  });
   if (result.error) {
     return Response.json({ error: result.error }, { status: 502 });
   }
@@ -189,45 +338,11 @@ async function handleZipImport(
     return Response.json({ error: `Failed to read ZIP: ${message}` }, { status: 400 });
   }
 
-  // Determine archive shape.
   const manifestEntry = findManifestEntry(zip);
   if (manifestEntry) {
     return runFullExportImport(zip, manifestEntry, creds, overrides);
   }
-
-  const single = await extractSingleCall(zip);
-  if (!single) {
-    return Response.json(
-      {
-        error:
-          "ZIP must contain either a metadata.json (single call) or manifest.json (full export).",
-      },
-      { status: 400 }
-    );
-  }
-
-  const metadata = mapExportToImportMetadata(single.raw, overrides);
-  if (!metadata.primaryUser) {
-    return Response.json(
-      { error: "metadata.json is missing primaryUserId; cannot import." },
-      { status: 400 }
-    );
-  }
-  if (single.media.byteLength > MAX_FILE_SIZE) {
-    return Response.json(
-      { error: "Recording inside ZIP exceeds 1.5 GB limit." },
-      { status: 400 }
-    );
-  }
-
-  const result = await importCall(creds, metadata, {
-    buffer: single.media,
-    contentType: single.contentType,
-  });
-  if (result.error) {
-    return Response.json({ error: result.error }, { status: 502 });
-  }
-  return Response.json(result.data);
+  return runSingleCallImport(zip, creds, overrides);
 }
 
 function findManifestEntry(zip: JSZip): JSZip.JSZipObject | null {

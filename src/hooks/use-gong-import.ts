@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { upload } from "@vercel/blob/client";
 import { useCredentials } from "@/components/credential-provider";
 import type {
   GongWorkspace,
@@ -88,19 +89,28 @@ export function useGongImport() {
       error: "",
       result: null,
       bulk: null,
-      progress: "Creating call record...",
+      progress: "Uploading file...",
     });
 
     try {
-      const formData = new FormData();
-      formData.append("credentials", JSON.stringify(credentials));
-      formData.append("metadata", JSON.stringify(metadata));
-      formData.append("file", file);
-      formData.append("mode", "manual");
+      const blob = await upload(file.name, file, {
+        access: "public",
+        handleUploadUrl: "/api/gong/blob-upload-token",
+      });
 
-      setImportState((prev) => ({ ...prev, progress: "Uploading media to Gong..." }));
+      setImportState((prev) => ({ ...prev, progress: "Creating call in Gong..." }));
 
-      const resp = await fetch("/api/gong/import", { method: "POST", body: formData });
+      const resp = await fetch("/api/gong/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "manual",
+          credentials,
+          metadata,
+          blobUrl: blob.url,
+          contentType: file.type || "application/octet-stream",
+        }),
+      });
 
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
@@ -115,7 +125,7 @@ export function useGongImport() {
       const message = err instanceof Error ? err.message : "Unknown error";
       setImportState({
         status: "error",
-        error: `Network error: ${message}`,
+        error: `Upload error: ${message}`,
         result: null,
         bulk: null,
         progress: "",
@@ -173,17 +183,27 @@ export function useGongImport() {
       error: "",
       result: null,
       bulk: null,
-      progress: "Reading ZIP and uploading to Gong...",
+      progress: "Uploading ZIP...",
     });
 
     try {
-      const formData = new FormData();
-      formData.append("credentials", JSON.stringify(credentials));
-      formData.append("file", file);
-      formData.append("mode", "zip");
-      if (overrides) formData.append("overrides", JSON.stringify(overrides));
+      const blob = await upload(file.name, file, {
+        access: "public",
+        handleUploadUrl: "/api/gong/blob-upload-token",
+      });
 
-      const resp = await fetch("/api/gong/import", { method: "POST", body: formData });
+      setImportState((prev) => ({ ...prev, progress: "Importing calls into Gong..." }));
+
+      const resp = await fetch("/api/gong/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "zip",
+          credentials,
+          blobUrl: blob.url,
+          overrides,
+        }),
+      });
 
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
@@ -214,7 +234,7 @@ export function useGongImport() {
       const message = err instanceof Error ? err.message : "Unknown error";
       setImportState({
         status: "error",
-        error: `Network error: ${message}`,
+        error: `Upload error: ${message}`,
         result: null,
         bulk: null,
         progress: "",
