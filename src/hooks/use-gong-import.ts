@@ -96,6 +96,7 @@ export function useGongImport() {
       const blob = await upload(file.name, file, {
         access: "public",
         handleUploadUrl: "/api/gong/blob-upload-token",
+        multipart: true,
       });
 
       setImportState((prev) => ({ ...prev, progress: "Creating call in Gong..." }));
@@ -190,6 +191,7 @@ export function useGongImport() {
       const blob = await upload(file.name, file, {
         access: "public",
         handleUploadUrl: "/api/gong/blob-upload-token",
+        multipart: true,
       });
 
       setImportState((prev) => ({ ...prev, progress: "Importing calls into Gong..." }));
