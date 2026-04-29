@@ -524,18 +524,36 @@ export async function uploadMedia(
   creds: GongCredentials,
   callId: string,
   mediaBuffer: ArrayBuffer,
-  contentType: string
+  contentType: string,
+  filename?: string
 ): Promise<ApiResult<{ ok: true }>> {
   const baseUrl = normalizeBaseUrl(creds.baseUrl);
+
+  // Gong's PUT /v2/calls/{id}/media expects multipart/form-data with a
+  // `mediaFile` field. Sending raw bytes — even with the correct
+  // Content-Type — returns 415 Unsupported Media Type.
+  const form = new FormData();
+  const ext =
+    contentType === "audio/mpeg" || contentType === "audio/mp3" ? "mp3"
+    : contentType === "audio/wav" || contentType === "audio/x-wav" ? "wav"
+    : contentType === "audio/flac" ? "flac"
+    : contentType === "video/mp4" ? "mp4"
+    : contentType === "video/x-matroska" ? "mkv"
+    : "bin";
+  form.append(
+    "mediaFile",
+    new Blob([mediaBuffer], { type: contentType }),
+    filename ?? `recording.${ext}`
+  );
 
   try {
     const resp = await fetch(`${baseUrl}/v2/calls/${encodeURIComponent(callId)}/media`, {
       method: "PUT",
       headers: {
         Authorization: buildAuthHeader(creds),
-        "Content-Type": contentType,
+        // Don't set Content-Type — fetch will add the multipart boundary.
       },
-      body: mediaBuffer,
+      body: form,
     });
 
     const rateLimitRemaining = resp.headers.get("X-RateLimit-Remaining")
