@@ -45,3 +45,4 @@ next-env.d.ts
 /scripts/scope-result.json
 /scripts/salesloft-count-result.json
 /scripts/salesloft-to-gong-test-result.json
+/scripts/salesloft-bulk.jsonl
