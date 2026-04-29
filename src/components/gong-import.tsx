@@ -87,6 +87,7 @@ export function GongImport({ onBack }: GongImportProps) {
   const [partyName, setPartyName] = useState("");
   const [partyEmail, setPartyEmail] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
+  const [zipPrimaryUserOverride, setZipPrimaryUserOverride] = useState("");
 
   function handleDrag(e: DragEvent) {
     e.preventDefault();
@@ -150,7 +151,11 @@ export function GongImport({ onBack }: GongImportProps) {
   async function handleSubmit() {
     if (mode === "zip") {
       if (!file) return;
-      await importZip(file, workspaceId ? { workspaceId } : undefined);
+      const overrides: { workspaceId?: string; primaryUser?: string } = {};
+      if (workspaceId) overrides.workspaceId = workspaceId;
+      const pu = zipPrimaryUserOverride.trim();
+      if (pu) overrides.primaryUser = pu;
+      await importZip(file, Object.keys(overrides).length ? overrides : undefined);
       return;
     }
 
@@ -521,9 +526,11 @@ export function GongImport({ onBack }: GongImportProps) {
                 <div className="flex items-start gap-2">
                   <Info className="mt-0.5 h-4 w-4 shrink-0 text-purple-400" />
                   <p className="text-xs leading-relaxed text-muted-foreground">
-                    Call title, date, parties, primary user, system, and language are
-                    read from each <code className="rounded bg-white/5 px-1 py-0.5 font-mono text-[10px]">metadata.json</code>{" "}
-                    inside the archive. Only Workspace can be overridden here.
+                    Call title, date, parties, system, and language are read from
+                    each <code className="rounded bg-white/5 px-1 py-0.5 font-mono text-[10px]">metadata.json</code>{" "}
+                    inside the archive. Workspace and Primary User can be overridden
+                    below — set Primary User if any original call owner is inactive
+                    or lacks the import permission in this Gong tenant.
                   </p>
                 </div>
 
@@ -547,6 +554,25 @@ export function GongImport({ onBack }: GongImportProps) {
                       </option>
                     ))}
                   </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="zip-primary-user" className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                    Primary User (override)
+                  </Label>
+                  <Input
+                    id="zip-primary-user"
+                    placeholder="user@company.com or Gong userId"
+                    value={zipPrimaryUserOverride}
+                    onChange={(e) => setZipPrimaryUserOverride(e.target.value)}
+                    className="rounded-lg border-white/10 bg-white/5"
+                  />
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Leave blank to use each call&apos;s original owner from
+                    metadata.json. Set this to route every imported call to one
+                    designated active Gong user (the only one whose import
+                    permission needs to be enabled).
+                  </p>
                 </div>
               </div>
             </div>
