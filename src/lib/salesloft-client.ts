@@ -286,7 +286,23 @@ export function toNormalizedCall(c: SalesLoftConversation): NormalizedCall {
     });
   }
 
-  const started = c.started_at ?? c.created_at ?? new Date().toISOString();
+  // Salesloft is inconsistent with started_recording_at: some rows return
+  // epoch seconds, others epoch milliseconds. Discriminate by magnitude
+  // (1e11 ms = year 1973). For ISO-string fallbacks, parse directly.
+  const startCandidate =
+    (c as { started_recording_at?: number | string }).started_recording_at ??
+    (c as { event_start_date?: string }).event_start_date ??
+    c.started_at ??
+    c.created_at;
+  let started: string;
+  if (typeof startCandidate === "number") {
+    const ms = startCandidate < 1e11 ? startCandidate * 1000 : startCandidate;
+    started = new Date(ms).toISOString();
+  } else if (typeof startCandidate === "string") {
+    started = new Date(startCandidate).toISOString();
+  } else {
+    started = new Date().toISOString();
+  }
 
   return {
     provider: "salesloft",

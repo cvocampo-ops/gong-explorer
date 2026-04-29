@@ -7,6 +7,8 @@ const ALLOWED_CONTENT_TYPES = [
   "application/octet-stream",
   "video/mp4",
   "video/x-matroska",
+  "audio/mp4",
+  "audio/x-m4a",
   "audio/wav",
   "audio/x-wav",
   "audio/mpeg",

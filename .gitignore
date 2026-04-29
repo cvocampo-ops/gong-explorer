@@ -43,3 +43,5 @@ next-env.d.ts
 
 # local diagnostics
 /scripts/scope-result.json
+/scripts/salesloft-count-result.json
+/scripts/salesloft-to-gong-test-result.json

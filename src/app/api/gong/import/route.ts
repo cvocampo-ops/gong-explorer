@@ -17,6 +17,7 @@ import type {
 const ALLOWED_MEDIA_TYPES = new Set([
   "video/mp4",
   "video/x-matroska",
+  "audio/mp4",
   "audio/wav",
   "audio/x-wav",
   "audio/mpeg",
@@ -25,13 +26,14 @@ const ALLOWED_MEDIA_TYPES = new Set([
   "application/octet-stream",
 ]);
 
-const RECORDING_EXTENSIONS = ["mp4", "mp3", "wav", "mkv", "flac"] as const;
-const MEDIA_PREFERENCE = ["mp4", "mp3", "wav", "flac", "mkv"];
+const RECORDING_EXTENSIONS = ["mp4", "m4a", "mp3", "wav", "mkv", "flac"] as const;
+const MEDIA_PREFERENCE = ["mp4", "m4a", "mp3", "wav", "flac", "mkv"];
 
 const MAX_FILE_SIZE = 1.5 * 1024 * 1024 * 1024; // 1.5 GB
 
 const CONTENT_TYPE_BY_EXT: Record<string, string> = {
   mp4: "video/mp4",
+  m4a: "audio/mp4",
   mp3: "audio/mpeg",
   wav: "audio/wav",
   flac: "audio/flac",

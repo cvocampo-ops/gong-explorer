@@ -149,7 +149,11 @@ function pickMedia(
     // User asked for video only; Salesloft has no distinct video URL.
     return [];
   }
-  return [{ url: SALESLOFT_RECORDING_SENTINEL, filename: "recording.mp3" }];
+  // Salesloft serves audio-only AAC inside an MP4 container. Use the .m4a
+  // extension so downstream Gong import sends the correct audio/mp4 content
+  // type — previously this was labeled .mp3 but the bytes aren't MP3, which
+  // caused Gong's media endpoint to reject the upload.
+  return [{ url: SALESLOFT_RECORDING_SENTINEL, filename: "recording.m4a" }];
 }
 
 export const salesloftAdapter: ExportAdapter<SalesLoftCredentials, SalesLoftExtensiveConversation> = {
