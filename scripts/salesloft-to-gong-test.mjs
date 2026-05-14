@@ -3,10 +3,14 @@
 // the EXACT logic the bulk runner will use (full participants, import tag,
 // customData, audio/mp4 multipart upload, idempotent on dedup).
 //
+// Each call's `primaryUser` is resolved from c.owner_id → SL /v2/users →
+// email → Gong user, matching the production bulk script. --primary is
+// the *fallback* when the rep isn't an active Gong user.
+//
 // Usage:
 //   node scripts/salesloft-to-gong-test.mjs                      # 1 call (most recent)
 //   node scripts/salesloft-to-gong-test.mjs --limit 5
-//   node scripts/salesloft-to-gong-test.mjs --primary ben.mcwilliams@2x.marketing
+//   node scripts/salesloft-to-gong-test.mjs --primary ben.mcwilliams@2x.marketing  # fallback when rep is missing in Gong
 
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -35,15 +39,35 @@ const arg = (f, d) => {
 };
 const limit = Number(arg("--limit", "1"));
 const offset = Number(arg("--offset", "0"));
-const primaryEmail = arg("--primary", "ben.mcwilliams@2x.marketing").toLowerCase();
+const fallbackEmail = arg("--primary", "ben.mcwilliams@2x.marketing").toLowerCase();
+// Append a suffix to clientUniqueId to bypass Gong's existing-call dedup —
+// useful when verifying the owner-resolution fix on an SL conversation that's
+// already been imported. Creates a new Gong call shell with the new owner;
+// the media upload may content-hash-dedup, which is fine — the shell still
+// proves the fix worked.
+const idSuffix = arg("--id-suffix", "");
+
+const emailOverrides = new Map();
+{
+  const raw = arg("--email-map", "");
+  if (raw) {
+    for (const pair of raw.split(",")) {
+      const [from, to] = pair.split("=").map((s) => s.trim().toLowerCase());
+      if (from && to) emailOverrides.set(from, to);
+    }
+  }
+}
 
 // Best-effort derivation of the Gong UI host from the API base URL
 // e.g. https://us-5470.api.gong.io → https://us-5470.app.gong.io
 const gongUiBase = GBASE.replace(/^(https?:\/\/[^/.]*\.)?api\.gong\.io/, (_, p) => `${p ?? ""}app.gong.io`).replace(".api.", ".app.");
 
 // --- Build Gong user index ----------------------------------------------
+// Indexed by email and by display name. Name fallback handles cross-domain
+// rebrands (e.g. SL @outboundfunnel.com → Gong @2x.marketing).
 const gongByEmail = new Map();
 const gongById = new Map();
+const gongByName = new Map();
 {
   let cursor;
   do {
@@ -60,14 +84,67 @@ const gongById = new Map();
       };
       gongById.set(u.id, rec);
       if (u.emailAddress) gongByEmail.set(u.emailAddress.toLowerCase(), rec);
+      if (rec.name && u.active !== false) {
+        const key = rec.name.toLowerCase().trim();
+        if (!gongByName.has(key)) gongByName.set(key, rec);
+      }
     }
     cursor = j.records?.cursor;
   } while (cursor);
 }
-const primaryUser = gongByEmail.get(primaryEmail);
-if (!primaryUser || primaryUser.active === false) {
-  console.error(`Primary user "${primaryEmail}" not found or inactive in Gong`);
+const fallbackUser = gongByEmail.get(fallbackEmail);
+if (!fallbackUser || fallbackUser.active === false) {
+  console.error(`Fallback user "${fallbackEmail}" not found or inactive in Gong`);
   process.exit(1);
+}
+
+// --- Salesloft user index ---
+// Lets us map c.owner_id → rep email so we can resolve the rep's Gong user.
+const slById = new Map();
+const slByGuid = new Map();
+{
+  let page = 1;
+  while (true) {
+    const r = await fetch(`https://api.salesloft.com/v2/users?per_page=100&page=${page}`, { headers: slH });
+    if (!r.ok) {
+      console.error(`SL /v2/users → ${r.status} ${await r.text()}`);
+      process.exit(1);
+    }
+    const j = await r.json();
+    for (const u of j.data || []) {
+      const rec = { id: u.id, guid: u.guid, name: u.name, email: u.email, active: u.active };
+      slById.set(String(u.id), rec);
+      if (u.guid) slByGuid.set(u.guid, rec);
+    }
+    if (!j.metadata?.paging?.next_page) break;
+    page = j.metadata.paging.next_page;
+  }
+}
+
+function resolveOwner(c) {
+  const slUser = c.owner_id ? (slByGuid.get(c.owner_id) || slById.get(String(c.owner_id))) : null;
+  const ownerEmailRaw = (slUser?.email || "").toLowerCase() || null;
+  const ownerNameRaw = (slUser?.name || "").toLowerCase().trim() || null;
+  if (ownerEmailRaw) {
+    const byEmail = gongByEmail.get(ownerEmailRaw);
+    if (byEmail && byEmail.active !== false) {
+      return { user: byEmail, source: "owner-email", ownerEmailRaw };
+    }
+  }
+  if (ownerEmailRaw && emailOverrides.has(ownerEmailRaw)) {
+    const target = emailOverrides.get(ownerEmailRaw);
+    const byOverride = gongByEmail.get(target);
+    if (byOverride && byOverride.active !== false) {
+      return { user: byOverride, source: "owner-override", ownerEmailRaw };
+    }
+  }
+  if (ownerNameRaw) {
+    const byName = gongByName.get(ownerNameRaw);
+    if (byName && byName.active !== false) {
+      return { user: byName, source: "owner-name", ownerEmailRaw };
+    }
+  }
+  return { user: fallbackUser, source: "fallback", ownerEmailRaw };
 }
 
 // --- Date + tag formatting ---
@@ -102,9 +179,12 @@ function emailMatchesName(email, name) {
   return false;
 }
 
-function buildParties(attendees, invitees, primary) {
+function buildParties(attendees, invitees, primary, rep) {
   const raw = [];
   raw.push({ userId: primary.id, affiliation: "Internal" });
+  if (rep && rep.id !== primary.id) {
+    raw.push({ userId: rep.id, affiliation: "Internal" });
+  }
   for (const a of attendees || []) {
     const email = (a.email || "").trim().toLowerCase();
     const name = (a.full_name || "").trim() || undefined;
@@ -134,6 +214,10 @@ function buildParties(attendees, invitees, primary) {
     let entry = { ...r };
     if (!entry.userId && entry.email) {
       const gu = gongByEmail.get(entry.email);
+      if (gu && gu.active !== false) entry = { userId: gu.id, affiliation: "Internal" };
+    }
+    if (!entry.userId && entry.name) {
+      const gu = gongByName.get(entry.name.toLowerCase().trim());
       if (gu && gu.active !== false) entry = { userId: gu.id, affiliation: "Internal" };
     }
     const idx = findIndex(entry);
@@ -202,7 +286,8 @@ async function gongUploadMedia(callId, buf, contentType, filename) {
 }
 
 // --- Run ----------------------------------------------------------------
-console.log(`Primary user:   ${primaryUser.name} <${primaryUser.email}>`);
+console.log(`Fallback user:  ${fallbackUser.name} <${fallbackUser.email}>  (used when SL owner isn't an active Gong user)`);
+console.log(`SL users:       ${slById.size}`);
 console.log(`Import tag:     "${importTag}"`);
 console.log(`Tenant:         ${GBASE}`);
 console.log("");
@@ -229,22 +314,28 @@ let i = 0;
 for (const c of convs) {
   i++;
   const tag = `[${i}/${convs.length}]`;
-  console.log(`${tag} SL ${c.id} — "${c.title}"`);
+  const { user: repUser, source: repSource, ownerEmailRaw } = resolveOwner(c);
+  const repLabel = repSource === "fallback"
+    ? `(no rep resolved; SL owner: ${ownerEmailRaw || "none"})`
+    : `rep=${repUser.email} [${repSource}]`;
+  console.log(`${tag} SL ${c.id} — "${c.title}"  ${repLabel}`);
   try {
     const ext = (await slGet(`/v2/conversations/${c.id}/extensive`)).data || c;
 
     const started = normalizeStarted(ext);
     const durationSec = Math.max(1, Math.round((ext.duration ?? 0) / 1000));
-    const parties = buildParties(ext.attendees || [], ext.invitees || [], primaryUser);
+    // True ownership: repUser is the primaryUser. Falls back to Ben inside
+    // resolveOwner when the rep isn't an active Gong user.
+    const parties = buildParties(ext.attendees || [], ext.invitees || [], repUser);
     const baseTitle = ext.title || `Salesloft call ${ext.id}`;
 
     const metadata = {
-      clientUniqueId: `salesloft-${ext.id}`,
+      clientUniqueId: idSuffix ? `salesloft-${ext.id}-${idSuffix}` : `salesloft-${ext.id}`,
       title: `${baseTitle} · ${importTag}`,
       actualStart: started,
       duration: durationSec,
       direction: "Conference",
-      primaryUser: primaryUser.id,
+      primaryUser: repUser.id,
       parties,
       customData: `salesloft-import:${importDate}`,
       ...(ext.language_code && { languageCode: ext.language_code }),
@@ -269,10 +360,10 @@ for (const c of convs) {
 
     const url = `${gongUiBase}/call?id=${callId}`;
     console.log(`${tag}   👉 ${url}`);
-    results.push({ slId: c.id, callId, url, status: "ok", parties: parties.length, durationSec });
+    results.push({ slId: c.id, callId, url, status: "ok", parties: parties.length, durationSec, repEmail: repUser.email, repSource, ownerEmailRaw });
   } catch (err) {
     console.log(`${tag}   ✗ ERROR: ${err.message}`);
-    results.push({ slId: c.id, status: "error", error: err.message });
+    results.push({ slId: c.id, status: "error", error: err.message, repEmail: repUser.email, repSource, ownerEmailRaw });
   }
   console.log("");
 }
@@ -292,5 +383,5 @@ if (fails.length) {
 
 await fs.writeFile(
   path.resolve("./scripts/salesloft-to-gong-test-result.json"),
-  JSON.stringify({ generatedAt: new Date().toISOString(), primaryEmail, results }, null, 2)
+  JSON.stringify({ generatedAt: new Date().toISOString(), fallbackEmail, results }, null, 2)
 );
