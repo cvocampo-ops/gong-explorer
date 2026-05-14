@@ -3,10 +3,14 @@
 // Shows the FULL parties array (all attendees + invitees) so you can verify
 // participant data is preserved.
 //
+// `primaryUser` is resolved from c.owner_id → SL /v2/users → email → Gong
+// user, matching the production bulk script. --primary is the *fallback*
+// when the rep isn't an active Gong user.
+//
 // Usage:
 //   node scripts/preview-salesloft-import.mjs                                    # 5 most recent
 //   node scripts/preview-salesloft-import.mjs --limit 10
-//   node scripts/preview-salesloft-import.mjs --primary ben.mcwilliams@2x.marketing
+//   node scripts/preview-salesloft-import.mjs --primary ben.mcwilliams@2x.marketing  # fallback when rep is missing in Gong
 
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -33,10 +37,24 @@ const arg = (f, d) => {
   return i >= 0 ? args[i + 1] : d;
 };
 const limit = Number(arg("--limit", "5"));
-const primaryEmail = arg("--primary", "ben.mcwilliams@2x.marketing").toLowerCase();
+const fallbackEmail = arg("--primary", "ben.mcwilliams@2x.marketing").toLowerCase();
+
+const emailOverrides = new Map();
+{
+  const raw = arg("--email-map", "");
+  if (raw) {
+    for (const pair of raw.split(",")) {
+      const [from, to] = pair.split("=").map((s) => s.trim().toLowerCase());
+      if (from && to) emailOverrides.set(from, to);
+    }
+  }
+}
 
 // --- Pull Gong user index ---
+// Indexed by email and by display name. Name fallback handles cross-domain
+// rebrands (e.g. SL @outboundfunnel.com → Gong @2x.marketing).
 const gongByEmail = new Map();
+const gongByName = new Map();
 {
   let cursor;
   do {
@@ -45,23 +63,75 @@ const gongByEmail = new Map();
     const r = await fetch(url, { headers: { Authorization: gAuth } });
     const j = await r.json();
     for (const u of j.users || []) {
-      if (u.emailAddress) {
-        gongByEmail.set(u.emailAddress.toLowerCase(), {
-          id: u.id,
-          name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.emailAddress,
-          email: u.emailAddress,
-          active: u.active,
-        });
+      const rec = {
+        id: u.id,
+        name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.emailAddress,
+        email: u.emailAddress,
+        active: u.active,
+      };
+      if (u.emailAddress) gongByEmail.set(u.emailAddress.toLowerCase(), rec);
+      if (rec.name && u.active !== false) {
+        const key = rec.name.toLowerCase().trim();
+        if (!gongByName.has(key)) gongByName.set(key, rec);
       }
     }
     cursor = j.records?.cursor;
   } while (cursor);
 }
 
-const primaryUser = gongByEmail.get(primaryEmail);
-if (!primaryUser || primaryUser.active === false) {
-  console.error(`Primary user "${primaryEmail}" not found or inactive in Gong`);
+const fallbackUser = gongByEmail.get(fallbackEmail);
+if (!fallbackUser || fallbackUser.active === false) {
+  console.error(`Fallback user "${fallbackEmail}" not found or inactive in Gong`);
   process.exit(1);
+}
+
+// --- Salesloft user index ---
+// Lets us map c.owner_id → rep email so we can resolve the rep's Gong user.
+const slById = new Map();
+const slByGuid = new Map();
+{
+  let page = 1;
+  while (true) {
+    const r = await fetch(`https://api.salesloft.com/v2/users?per_page=100&page=${page}`, { headers: slH });
+    if (!r.ok) {
+      console.error(`SL /v2/users → ${r.status} ${await r.text()}`);
+      process.exit(1);
+    }
+    const j = await r.json();
+    for (const u of j.data || []) {
+      const rec = { id: u.id, guid: u.guid, name: u.name, email: u.email, active: u.active };
+      slById.set(String(u.id), rec);
+      if (u.guid) slByGuid.set(u.guid, rec);
+    }
+    if (!j.metadata?.paging?.next_page) break;
+    page = j.metadata.paging.next_page;
+  }
+}
+
+function resolveOwner(c) {
+  const slUser = c.owner_id ? (slByGuid.get(c.owner_id) || slById.get(String(c.owner_id))) : null;
+  const ownerEmailRaw = (slUser?.email || "").toLowerCase() || null;
+  const ownerNameRaw = (slUser?.name || "").toLowerCase().trim() || null;
+  if (ownerEmailRaw) {
+    const byEmail = gongByEmail.get(ownerEmailRaw);
+    if (byEmail && byEmail.active !== false) {
+      return { user: byEmail, source: "owner-email", ownerEmailRaw };
+    }
+  }
+  if (ownerEmailRaw && emailOverrides.has(ownerEmailRaw)) {
+    const target = emailOverrides.get(ownerEmailRaw);
+    const byOverride = gongByEmail.get(target);
+    if (byOverride && byOverride.active !== false) {
+      return { user: byOverride, source: "owner-override", ownerEmailRaw };
+    }
+  }
+  if (ownerNameRaw) {
+    const byName = gongByName.get(ownerNameRaw);
+    if (byName && byName.active !== false) {
+      return { user: byName, source: "owner-name", ownerEmailRaw };
+    }
+  }
+  return { user: fallbackUser, source: "fallback", ownerEmailRaw };
 }
 
 // --- Date formatting ---
@@ -106,10 +176,13 @@ function emailMatchesName(email, name) {
 // emails to Gong userIds where possible. The primaryUser is always the
 // first party. Same-person duplicates (e.g. attendee with name only and
 // invitee with email only) are merged by name-slug↔email-username match.
-function buildParties(attendees, invitees, primary) {
+function buildParties(attendees, invitees, primary, rep) {
   // Stage 1: collect every raw entry from attendees + invitees
   const raw = [];
   raw.push({ userId: primary.id, affiliation: "Internal", _primary: true });
+  if (rep && rep.id !== primary.id) {
+    raw.push({ userId: rep.id, affiliation: "Internal", _rep: true });
+  }
 
   for (const a of attendees || []) {
     const email = (a.email || "").trim().toLowerCase();
@@ -148,10 +221,18 @@ function buildParties(attendees, invitees, primary) {
   for (const r of raw) {
     let entry = { ...r };
     delete entry._primary;
+    delete entry._rep;
     // Resolve email to a Gong user id if we can — that gives us much better
     // attribution and lets this entry merge with existing ones via userId.
     if (!entry.userId && entry.email) {
       const gu = gongByEmail.get(entry.email);
+      if (gu && gu.active !== false) {
+        entry = { userId: gu.id, affiliation: "Internal" };
+      }
+    }
+    // Name-match fallback — handles SL @outboundfunnel.com → Gong @2x.marketing rebrand.
+    if (!entry.userId && entry.name) {
+      const gu = gongByName.get(entry.name.toLowerCase().trim());
       if (gu && gu.active !== false) {
         entry = { userId: gu.id, affiliation: "Internal" };
       }
@@ -186,9 +267,10 @@ async function slGet(p) {
   return r.json();
 }
 
-console.log(`Primary user: ${primaryUser.name} <${primaryUser.email}>`);
-console.log(`Import tag:   "${importTag}"`);
-console.log(`Gong users indexed: ${gongByEmail.size}`);
+console.log(`Fallback user: ${fallbackUser.name} <${fallbackUser.email}>  (used when SL owner isn't an active Gong user)`);
+console.log(`Import tag:    "${importTag}"`);
+console.log(`Gong users:    ${gongByEmail.size}`);
+console.log(`SL users:      ${slById.size}`);
 console.log("");
 
 const list = await slGet(`/v2/conversations?per_page=${limit}&page=1&sort_by=created_at&sort_direction=desc`);
@@ -198,13 +280,15 @@ console.log(`=== Preview of ${convs.length} call(s) — NO UPLOADS ===\n`);
 let i = 0;
 for (const c of convs) {
   i++;
+  const { user: repUser, source: repSource, ownerEmailRaw } = resolveOwner(c);
   const ext = await slGet(`/v2/conversations/${c.id}/extensive`);
   const ec = ext.data || c;
   const started = normalizeStarted(ec);
   const durationSec = Math.max(1, Math.round((ec.duration ?? 0) / 1000));
   const baseTitle = ec.title || `Salesloft call ${ec.id}`;
   const finalTitle = `${baseTitle} · ${importTag}`;
-  const parties = buildParties(ec.attendees || [], ec.invitees || [], primaryUser);
+  // True ownership: repUser is the primaryUser (falls back to Ben inside resolveOwner).
+  const parties = buildParties(ec.attendees || [], ec.invitees || [], repUser);
 
   const metadata = {
     clientUniqueId: `salesloft-${ec.id}`,
@@ -212,11 +296,15 @@ for (const c of convs) {
     actualStart: started,
     duration: durationSec,
     direction: "Conference",
-    primaryUser: primaryUser.id,
+    primaryUser: repUser.id,
     parties,
     customData: `salesloft-import:${new Date().toISOString().slice(0, 10)}`,
     ...(ec.language_code && { languageCode: ec.language_code }),
   };
+
+  const ownerLine = repSource === "fallback"
+    ? `${repUser.name} <${repUser.email}>  [FALLBACK — SL owner ${ownerEmailRaw || "(none)"} not in Gong]`
+    : `${repUser.name} <${repUser.email}>  [resolved via ${repSource}]`;
 
   console.log(`──── [${i}/${convs.length}] ────────────────────────────────────────`);
   console.log(`Salesloft id:     ${ec.id}`);
@@ -224,12 +312,13 @@ for (const c of convs) {
   console.log(`Final title:      "${finalTitle}"`);
   console.log(`Date:             ${prettyDate(new Date(started))}  (${started})`);
   console.log(`Duration:         ${durationSec}s  (${(durationSec / 60).toFixed(1)} min)`);
-  console.log(`SL owner:         ${ec.owner_email || "(none)"}`);
+  console.log(`SL owner:         ${ownerEmailRaw || "(none)"}`);
+  console.log(`Gong primaryUser: ${ownerLine}`);
   console.log("");
   console.log(`Parties (${parties.length}):`);
   for (const p of parties) {
-    if (p.userId === primaryUser.id) {
-      console.log(`  ★ Gong user  ${primaryUser.name} <${primaryUser.email}>  [PRIMARY/Internal]`);
+    if (p.userId === repUser.id) {
+      console.log(`  ★ Gong user  ${repUser.name} <${repUser.email}>  [PRIMARY/Internal]`);
     } else if (p.userId) {
       // resolved to a Gong user other than primary
       const u = Array.from(gongByEmail.values()).find((x) => x.id === p.userId);

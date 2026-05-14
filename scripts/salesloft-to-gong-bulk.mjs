@@ -8,11 +8,23 @@
 // so reruns of already-completed calls return Gong's existing callId
 // without creating duplicates.
 //
+// primaryUser is resolved per-call from the SL conversation's owner:
+// c.owner_id → SL /v2/users → email match → name match. The resolved
+// rep is used as the Gong primaryUser directly (true ownership). Falls
+// back to --primary (default Ben) when the SL owner doesn't map to an
+// active Gong user. The JSONL log records repEmail/repSource so post-run
+// audits show which calls hit the fallback.
+//
+// Requires the target rep's settings.telephonyCallsImported=true in
+// Gong. Verify via Admin → Team members → user → Data capture → Telephony
+// calls. Without that flag, POST /v2/calls 409s for that user.
+//
 // Usage:
 //   node scripts/salesloft-to-gong-bulk.mjs                                 # everything, oldest first
-//   node scripts/salesloft-to-gong-bulk.mjs --primary ben.mcwilliams@2x.marketing
+//   node scripts/salesloft-to-gong-bulk.mjs --primary ben.mcwilliams@2x.marketing   # fallback when rep is missing in Gong
 //   node scripts/salesloft-to-gong-bulk.mjs --limit 5                       # smoke-test slice
 //   node scripts/salesloft-to-gong-bulk.mjs --resume                        # skip slIds already in the JSONL log
+//   node scripts/salesloft-to-gong-bulk.mjs --dry-run                       # plan only: no createCall, no upload
 
 import fs from "node:fs/promises";
 import { createWriteStream, existsSync, readFileSync } from "node:fs";
@@ -38,9 +50,25 @@ const gAuth = "Basic " + Buffer.from(`${GAK}:${GAS}`).toString("base64");
 const args = process.argv.slice(2);
 const arg = (f, d) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : d; };
 const flag = (f) => args.includes(f);
-const primaryEmail = arg("--primary", "ben.mcwilliams@2x.marketing").toLowerCase();
+const fallbackEmail = arg("--primary", "ben.mcwilliams@2x.marketing").toLowerCase();
 const limit = arg("--limit") ? Number(arg("--limit")) : null;
 const resume = flag("--resume");
+const dryRun = flag("--dry-run");
+
+// --email-map "sl1@old.com=gong1@new.com,sl2@old.com=gong2@new.com"
+// Explicit SL→Gong email overrides, used after the email lookup but before
+// the name fallback. Useful when one rep's name in SL doesn't match Gong
+// (nickname / typo / multiple matches).
+const emailOverrides = new Map();
+{
+  const raw = arg("--email-map", "");
+  if (raw) {
+    for (const pair of raw.split(",")) {
+      const [from, to] = pair.split("=").map((s) => s.trim().toLowerCase());
+      if (from && to) emailOverrides.set(from, to);
+    }
+  }
+}
 
 const LOG_PATH = path.resolve("./scripts/salesloft-bulk.jsonl");
 
@@ -63,7 +91,13 @@ function logEvent(event) {
 }
 
 // --- Gong user index ---
+// Indexed by both email and display name. The name index exists because the
+// SL tenant uses @outboundfunnel.com emails and the Gong tenant uses
+// @2x.marketing emails (rebrand) — without a name fallback, ~0% of SL owners
+// would map to a Gong user.
 const gongByEmail = new Map();
+const gongByName = new Map();
+const nameCollisions = [];
 {
   let cursor;
   do {
@@ -72,22 +106,91 @@ const gongByEmail = new Map();
     const r = await fetch(url, { headers: { Authorization: gAuth } });
     const j = await r.json();
     for (const u of j.users || []) {
-      if (u.emailAddress) {
-        gongByEmail.set(u.emailAddress.toLowerCase(), {
-          id: u.id,
-          name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.emailAddress,
-          email: u.emailAddress,
-          active: u.active,
-        });
+      const rec = {
+        id: u.id,
+        name: [u.firstName, u.lastName].filter(Boolean).join(" ") || u.emailAddress,
+        email: u.emailAddress,
+        active: u.active,
+      };
+      if (u.emailAddress) gongByEmail.set(u.emailAddress.toLowerCase(), rec);
+      if (rec.name && u.active !== false) {
+        const key = rec.name.toLowerCase().trim();
+        if (gongByName.has(key)) nameCollisions.push(rec.name);
+        else gongByName.set(key, rec);
       }
     }
     cursor = j.records?.cursor;
   } while (cursor);
 }
-const primaryUser = gongByEmail.get(primaryEmail);
-if (!primaryUser || primaryUser.active === false) {
-  console.error(`Primary user "${primaryEmail}" not found or inactive in Gong`);
+if (nameCollisions.length) {
+  console.warn(`⚠ Gong has duplicate active-user names; name fallback will pick the FIRST and ignore the rest: ${nameCollisions.join(", ")}`);
+}
+const fallbackUser = gongByEmail.get(fallbackEmail);
+if (!fallbackUser || fallbackUser.active === false) {
+  console.error(`Fallback user "${fallbackEmail}" not found or inactive in Gong`);
   process.exit(1);
+}
+
+// --- Salesloft user index ---
+// Mirrors scripts/route-salesloft-import.mjs:58-74. Each conversation list row
+// has an `owner_id`; we resolve that to a real email so we can map to a Gong
+// user and use them as primaryUser instead of always falling back to Ben.
+const slById = new Map();
+const slByGuid = new Map();
+{
+  let page = 1;
+  while (true) {
+    const r = await fetch(`https://api.salesloft.com/v2/users?per_page=100&page=${page}`, { headers: slH });
+    if (!r.ok) {
+      console.error(`SL /v2/users → ${r.status} ${await r.text()}`);
+      process.exit(1);
+    }
+    const j = await r.json();
+    for (const u of j.data || []) {
+      const rec = { id: u.id, guid: u.guid, name: u.name, email: u.email, active: u.active };
+      slById.set(String(u.id), rec);
+      if (u.guid) slByGuid.set(u.guid, rec);
+    }
+    if (!j.metadata?.paging?.next_page) break;
+    page = j.metadata.paging.next_page;
+  }
+}
+
+// Resolves which Gong user should own the call.
+// 1. Look up c.owner_id in the SL user index → get rep email.
+// 2. Map that email to an active Gong user. If found, use them.
+// 3. Otherwise fall back to fallbackUser (default Ben).
+// Returns { user, source, ownerEmailRaw } where source is "owner" or "fallback"
+// and ownerEmailRaw is the rep's SL email (or null) for audit logging.
+function resolveOwner(c) {
+  const slUser = c.owner_id ? (slByGuid.get(c.owner_id) || slById.get(String(c.owner_id))) : null;
+  const ownerEmailRaw = (slUser?.email || "").toLowerCase() || null;
+  const ownerNameRaw = (slUser?.name || "").toLowerCase().trim() || null;
+
+  // 1. Try email match (works when SL and Gong share domain).
+  if (ownerEmailRaw) {
+    const byEmail = gongByEmail.get(ownerEmailRaw);
+    if (byEmail && byEmail.active !== false) {
+      return { user: byEmail, source: "owner-email", ownerEmailRaw };
+    }
+  }
+  // 2. Try explicit email override (SL→Gong map), e.g. cross-domain rebrand.
+  if (ownerEmailRaw && emailOverrides.has(ownerEmailRaw)) {
+    const target = emailOverrides.get(ownerEmailRaw);
+    const byOverride = gongByEmail.get(target);
+    if (byOverride && byOverride.active !== false) {
+      return { user: byOverride, source: "owner-override", ownerEmailRaw };
+    }
+  }
+  // 3. Try display-name match (catches rebrands where the same person has
+  //    a new email in Gong but the same name).
+  if (ownerNameRaw) {
+    const byName = gongByName.get(ownerNameRaw);
+    if (byName && byName.active !== false) {
+      return { user: byName, source: "owner-name", ownerEmailRaw };
+    }
+  }
+  return { user: fallbackUser, source: "fallback", ownerEmailRaw };
 }
 
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
@@ -125,9 +228,19 @@ function cleanEmail(raw) {
   return e;
 }
 
-function buildParties(attendees, invitees, primary) {
+// Builds the Gong `parties` array. `primary` is the permissioned Gong user
+// who will be primaryUser (the only user Gong allows as call owner — see
+// memory/gong-call-import-permission.md). `rep` is the actual call rep
+// resolved from c.owner_id; we inject them as a userId-bound party so the
+// Gong UI's "filter by user" surfaces this call under the rep. Attendees
+// and invitees are also resolved to Gong userIds via both email and name
+// match where possible.
+function buildParties(attendees, invitees, primary, rep) {
   const raw = [];
   raw.push({ userId: primary.id, affiliation: "Internal" });
+  if (rep && rep.id !== primary.id) {
+    raw.push({ userId: rep.id, affiliation: "Internal" });
+  }
   for (const a of attendees || []) {
     const email = cleanEmail(a.email);
     const name = (a.full_name || "").trim() || undefined;
@@ -156,6 +269,11 @@ function buildParties(attendees, invitees, primary) {
     let entry = { ...r };
     if (!entry.userId && entry.email) {
       const gu = gongByEmail.get(entry.email);
+      if (gu && gu.active !== false) entry = { userId: gu.id, affiliation: "Internal" };
+    }
+    // Name-match fallback — same rebrand-handling as resolveOwner.
+    if (!entry.userId && entry.name) {
+      const gu = gongByName.get(entry.name.toLowerCase().trim());
       if (gu && gu.active !== false) entry = { userId: gu.id, affiliation: "Internal" };
     }
     const idx = findIndex(entry);
@@ -280,10 +398,13 @@ async function pullAllConversations() {
   return out;
 }
 
-console.log(`Primary user:   ${primaryUser.name} <${primaryUser.email}>`);
+console.log(`Fallback user:  ${fallbackUser.name} <${fallbackUser.email}>  (used when SL owner isn't an active Gong user)`);
+console.log(`SL users:       ${slById.size}`);
+console.log(`Gong users:     ${gongByEmail.size}`);
 console.log(`Import tag:     "${importTag}"`);
 console.log(`Tenant:         ${GBASE}`);
 console.log(`Log file:       ${path.relative(process.cwd(), LOG_PATH)}`);
+if (dryRun) console.log(`Mode:           DRY RUN (no createCall, no upload)`);
 console.log("");
 
 console.log("Pulling all Salesloft conversations (oldest first)...");
@@ -300,7 +421,8 @@ if (limit) {
 console.log("");
 
 const startedAt = Date.now();
-const stats = { ok: 0, dedup: 0, error: 0 };
+const stats = { ok: 0, dedup: 0, error: 0, ownerKept: 0, ownerFallback: 0, byEmail: 0, byOverride: 0, byName: 0 };
+const fallbackByOwnerEmail = new Map(); // for dry-run audit summary
 
 let i = 0;
 for (const c of convs) {
@@ -308,7 +430,30 @@ for (const c of convs) {
   const tag = `[${i}/${convs.length}]`;
   const slId = c.id;
   const baseTitle = c.title || `Salesloft call ${slId}`;
-  console.log(`${tag} ${slId} — "${baseTitle}"`);
+
+  // Resolve the actual rep (Sarah etc.) — used only to inject as a userId
+  // party. Gong's call-import permission gate forces primaryUser=Ben.
+  const { user: repUser, source: repSource, ownerEmailRaw } = resolveOwner(c);
+  if (repSource === "fallback") {
+    stats.ownerFallback++;
+    const key = ownerEmailRaw || "(no SL owner email)";
+    fallbackByOwnerEmail.set(key, (fallbackByOwnerEmail.get(key) || 0) + 1);
+  } else {
+    stats.ownerKept++;
+    if (repSource === "owner-email") stats.byEmail++;
+    else if (repSource === "owner-override") stats.byOverride++;
+    else if (repSource === "owner-name") stats.byName++;
+  }
+
+  const repLabel = repSource === "fallback"
+    ? `(no rep resolved; SL owner: ${ownerEmailRaw || "none"})`
+    : `rep=${repUser.email} [${repSource}]`;
+  console.log(`${tag} ${slId} — "${baseTitle}"  ${repLabel}`);
+
+  if (dryRun) {
+    logEvent({ slId, status: "dry-run", title: baseTitle, repEmail: repUser.email, repSource, ownerEmailRaw });
+    continue;
+  }
 
   let phase = "init";
   try {
@@ -317,7 +462,10 @@ for (const c of convs) {
 
     const started = normalizeStarted(ext);
     const durationSec = Math.max(1, Math.round((ext.duration ?? 0) / 1000));
-    const parties = buildParties(ext.attendees || [], ext.invitees || [], primaryUser);
+    // True ownership: the resolved rep IS the primaryUser. When resolveOwner
+    // falls back (rep not in Gong or inactive), repUser is the fallback user,
+    // so primaryUser=Ben for those calls.
+    const parties = buildParties(ext.attendees || [], ext.invitees || [], repUser);
 
     const metadata = {
       clientUniqueId: `salesloft-${slId}`,
@@ -325,7 +473,7 @@ for (const c of convs) {
       actualStart: started,
       duration: durationSec,
       direction: "Conference",
-      primaryUser: primaryUser.id,
+      primaryUser: repUser.id,
       parties,
       customData: `salesloft-import:${importDate}`,
       ...(ext.language_code && { languageCode: ext.language_code }),
@@ -352,17 +500,17 @@ for (const c of convs) {
     if (upResult.dedup) {
       stats.dedup++;
       console.log(`${tag}   ↺ media dedup (existing callID ${upResult.dedupCallId}) · counted as success`);
-      logEvent({ slId, callId, status: "dedup", title: baseTitle, sizeMB, parties: parties.length, dedupCallId: upResult.dedupCallId });
+      logEvent({ slId, callId, status: "dedup", title: baseTitle, sizeMB, parties: parties.length, dedupCallId: upResult.dedupCallId, repEmail: repUser.email, repSource, ownerEmailRaw });
     } else {
       stats.ok++;
       console.log(`${tag}   ✓ ${sizeMB} MB uploaded in ${(upMs / 1000).toFixed(1)}s`);
-      logEvent({ slId, callId, status: "ok", title: baseTitle, sizeMB, parties: parties.length, uploadMs: upMs });
+      logEvent({ slId, callId, status: "ok", title: baseTitle, sizeMB, parties: parties.length, uploadMs: upMs, repEmail: repUser.email, repSource, ownerEmailRaw });
     }
   } catch (err) {
     stats.error++;
     const msg = err.message;
     console.log(`${tag}   ✗ ERROR (${phase}): ${msg.slice(0, 200)}`);
-    logEvent({ slId, status: "error", phase, title: baseTitle, error: msg });
+    logEvent({ slId, status: "error", phase, title: baseTitle, error: msg, repEmail: repUser.email, repSource, ownerEmailRaw });
   }
 
   // Progress every 10 calls
@@ -377,10 +525,26 @@ for (const c of convs) {
 console.log("");
 console.log("=== DONE ===");
 console.log(`Total: ${convs.length}`);
-console.log(`  ok:    ${stats.ok}`);
-console.log(`  dedup: ${stats.dedup}  (already in Gong; metadata shell created if new clientUniqueId)`);
-console.log(`  error: ${stats.error}`);
+if (!dryRun) {
+  console.log(`  ok:    ${stats.ok}`);
+  console.log(`  dedup: ${stats.dedup}  (already in Gong; metadata shell created if new clientUniqueId)`);
+  console.log(`  error: ${stats.error}`);
+}
+console.log("");
+console.log("Rep attribution (rep is injected as a userId party; primaryUser stays as Ben):");
+console.log(`  ✓ rep resolved:    ${stats.ownerKept}`);
+console.log(`      via email match:        ${stats.byEmail}`);
+console.log(`      via --email-map:        ${stats.byOverride}`);
+console.log(`      via name match:         ${stats.byName}`);
+console.log(`  ↪ no rep mapped (Ben only): ${stats.ownerFallback}`);
+if (fallbackByOwnerEmail.size) {
+  console.log("");
+  console.log("Fallback breakdown (SL owner → fallback count):");
+  for (const [email, n] of Array.from(fallbackByOwnerEmail).sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${String(n).padStart(4)}  ${email}`);
+  }
+}
 console.log("");
 console.log(`Per-call log: ${path.relative(process.cwd(), LOG_PATH)}`);
-console.log(`Re-run with --resume to retry only failures.`);
+if (!dryRun) console.log(`Re-run with --resume to retry only failures.`);
 logStream.end();
